@@ -18,7 +18,8 @@
     4. 已注入标记存在则跳过（幂等）；
     5. 落盘前用 compile() 预检语法，落盘后用 py_compile 复核；
        任一编译失败则不写入任何文件；
-    6. assets/ 下的静态资源在补丁全部成功后才安装到核心目录（不参与编译、幂等）。
+    6. assets/ 下的静态资源在补丁全部成功后才安装到核心目录（不参与编译、幂等）；
+       并把多设备增强脚本幂等内联进原生控制台 web/card.html。
 
 版本专属 hotfix（hotfixes/v<coreVersion>.json）：
     除基础补丁外，按核心版本加载同名 hotfix 文件，并二次核对文件内的
@@ -31,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import py_compile
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -190,11 +192,60 @@ HOTFIX_DIR = Path(__file__).with_name("hotfixes")
 ASSETS_DIR = Path(__file__).with_name("assets")
 
 
-def install_assets(eink_dir: Path) -> list[str]:
-    """把扩展包里的静态资源装进核心目录（2.0.4：web/devices.html 多设备登记页）。
+INLINE_JS = ASSETS_DIR / "web" / "todoocard-devices.js"
+INLINE_SCRIPT_ID = "todoocard-devices-inline"
+INLINE_BLOCK_RE = re.compile(
+    r'<script id="' + INLINE_SCRIPT_ID + r'">.*?</script>\n?', re.S
+)
 
-    不在 patch 体系内：HTML 不参与 compile/py_compile，只在源码补丁全部落盘、
-    编译复核成功之后才复制。assets/ 不存在就跳过，旧扩展包与未来新版本不受影响；
+
+def inject_console_script(eink_dir: Path) -> list[str]:
+    """把多设备增强脚本内联注入原生控制台 web/card.html（2.0.5）。
+
+    内联而非外链：上游 server.py 只静态服务 card.html / scenes.html，外链需要
+    新增后端路由；内联只需在 </body> 前插入一块带固定 id 的 <script>，
+    重装时按内容比对更新，同内容不重复写（幂等）。
+
+    上游 card.html 结构变化（找不到 card.html 或 </body> 不唯一）时直接失败，
+    绝不静默丢掉「配对时登记别名 / 发送时选设备」这两个功能。
+    """
+    if not INLINE_JS.is_file():
+        return []
+    page = eink_dir / "web" / "card.html"
+    if not page.is_file():
+        raise PatchError(f"目标目录缺少 web/card.html：{eink_dir}")
+    js = INLINE_JS.read_bytes().decode("utf-8")
+    if "</script" in js.lower():
+        raise PatchError("多设备增强脚本含 </script 字面量，会破坏 HTML，拒绝注入")
+    block = f'<script id="{INLINE_SCRIPT_ID}">\n{js}\n</script>\n'
+    try:
+        text = page.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise PatchError(f"web/card.html 不是 UTF-8 文本: {e}") from e
+
+    found = INLINE_BLOCK_RE.search(text)
+    if found:
+        if found.group(0) == block:
+            return [f"控制台增强脚本已存在 {INLINE_SCRIPT_ID}（幂等）"]
+        page.write_bytes(
+            INLINE_BLOCK_RE.sub(lambda _m: block, text, count=1).encode("utf-8")
+        )
+        return [f"更新控制台增强脚本 {INLINE_SCRIPT_ID}"]
+
+    if text.count("</body>") != 1:
+        raise PatchError(
+            "web/card.html 里 </body> 应恰好出现 1 次，上游页面可能已改版，需维护者重基"
+        )
+    page.write_bytes(text.replace("</body>", block + "</body>", 1).encode("utf-8"))
+    return [f"注入控制台增强脚本 {INLINE_SCRIPT_ID}"]
+
+
+def install_assets(eink_dir: Path) -> list[str]:
+    """把扩展包里的静态资源装进核心目录（2.0.4：web/devices.html 多设备登记页；
+    2.0.5：web/todoocard-devices.js 控制台增强脚本 + 内联进 card.html）。
+
+    不在 patch 体系内：HTML/JS 不参与 compile/py_compile，只在源码补丁全部落盘、
+    编译复核成功之后才安装。assets/ 不存在就跳过，旧扩展包与未来新版本不受影响；
     内容一致时不重复写（幂等）。
     """
     if not ASSETS_DIR.is_dir():
@@ -212,6 +263,7 @@ def install_assets(eink_dir: Path) -> list[str]:
         else:
             dst.write_bytes(data)
             logs.append(f"安装资源 {rel}")
+    logs.extend(inject_console_script(eink_dir))
     return logs
 
 

@@ -59,6 +59,13 @@ class ApplyPatchTests(unittest.TestCase):
         self.eink.mkdir()
         for name in FILES:
             shutil.copyfile(FIXTURE / name, self.eink / name)
+        # 上游原生控制台页面（最小替身，供 2.0.5 内联注入校验）
+        web = self.eink / "web"
+        web.mkdir()
+        (web / "card.html").write_text(
+            "<!DOCTYPE html>\n<html><body><div id='scanResult'></div></body></html>\n",
+            encoding="utf-8",
+        )
         self.before = {n: (self.eink / n).read_bytes() for n in FILES}
 
     def tearDown(self):
@@ -547,6 +554,64 @@ class ApplyPatchTests(unittest.TestCase):
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, card)
+
+    # ── 2.0.5：原生控制台内联增强 ─────────────────────────────────────────
+
+    def test_17_console_script_injected_and_idempotent(self):
+        """增强脚本内联进 card.html：幂等、内容可更新、功能点齐全。"""
+        r = run_apply(self.eink)
+        self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
+        page = self.eink / "web" / "card.html"
+        html = page.read_text(encoding="utf-8")
+        js = (EXT_DIR / "assets" / "web" / "todoocard-devices.js").read_text(encoding="utf-8")
+
+        self.assertIn('<script id="todoocard-devices-inline">', html)
+        self.assertIn(js, html)
+        self.assertEqual(html.count("</body>"), 1)
+        self.assertLess(html.index('<script id="todoocard-devices-inline">'),
+                        html.index("</body>"), "脚本必须在 </body> 之前")
+        self.assertEqual((self.eink / "web" / "todoocard-devices.js").read_bytes(),
+                         js.encode("utf-8"), "独立副本也要装进 web/")
+
+        # 两个需求都必须在注入的脚本里落地
+        for needle in (
+            "登记并设为当前",          # 配对时登记别名
+            "填入登记",                # 扫描结果可直接把 UUID 带进登记表单
+            "/api/card/devices/register",
+            "发到哪张卡？",            # 发送时多设备选择
+            "reg.devices.length < 2",  # 只有一台就不弹选择
+            "window.send = async function",
+            "window.useDevice = async function",
+            "window.scanDevices = async function",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, js)
+
+        first = page.read_bytes()
+        r2 = run_apply(self.eink)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("控制台增强脚本已存在", r2.stdout)
+        self.assertEqual(page.read_bytes(), first, "第二次运行不得改动 card.html")
+
+        # 模拟未来版本换了 JS：重装必须替换整块，而不是叠加两份脚本
+        page.write_text(html.replace(js, js + "\n/* stale */"), encoding="utf-8")
+        r3 = run_apply(self.eink)
+        self.assertEqual(r3.returncode, 0, r3.stderr)
+        self.assertIn("更新控制台增强脚本", r3.stdout)
+        self.assertEqual(page.read_bytes(), first, "过期脚本必须被整块替换")
+
+    def test_18_console_page_drift_fails_loudly(self):
+        """card.html 缺 </body> 或缺失 → 非 0，不静默丢掉两个功能。"""
+        page = self.eink / "web" / "card.html"
+        page.write_text("<html><body><div id='scanResult'></div>", encoding="utf-8")
+        r = run_apply(self.eink)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("</body>", r.stderr + r.stdout)
+
+        page.unlink()
+        r2 = run_apply(self.eink)
+        self.assertNotEqual(r2.returncode, 0)
+        self.assertIn("card.html", r2.stderr + r2.stdout)
 
 
 if __name__ == "__main__":

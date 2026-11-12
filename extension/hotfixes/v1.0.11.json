@@ -4,7 +4,7 @@
   "targetCoreVersion": "1.0.11",
   "targetCoreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "sourceTag": "v1.0.11-macos",
-  "description": "上游 v1.0.11 专属热修复：给 BLE 的每次 await 加超时，避免 macOS CoreBluetooth 在设备不回 ATT Write Response 时永久挂起导致核心 busy 锁死；修正照片占位卡渲染引用了不存在的字号字典；让发送失败提示显示真正的报错而不是 [sender] 日志开头；已绑定 device_id 时只认精确匹配，绝不 fallback 到另一台 TodooCard，避免两台卡广播名/厂商数据相同时把图发错设备；并加入多设备别名注册表与人工登记页（自定义别名 ↔ 蓝牙 MAC ↔ 一组 macOS UUID）。",
+  "description": "上游 v1.0.11 专属热修复：给 BLE 的每次 await 加超时，避免 macOS CoreBluetooth 在设备不回 ATT Write Response 时永久挂起导致核心 busy 锁死；修正照片占位卡渲染引用了不存在的字号字典；让发送失败提示显示真正的报错而不是 [sender] 日志开头；已绑定 device_id 时只认精确匹配，绝不 fallback 到另一台 TodooCard，避免两台卡广播名/厂商数据相同时把图发错设备；并加入多设备别名注册表与人工登记页（自定义别名 ↔ 蓝牙 MAC ↔ 一组 macOS UUID）。 2.0.5 的「配对时登记别名 / 发送时多设备选择」由 assets/web/todoocard-devices.js 内联进原生控制台，不在此文件新增补丁。",
   "appliesOnlyTo": "coreVersion == 1.0.11 且 coreCommit == 3642b4b25e42e38776f3227db601474173f915b1；其他版本一律不注入",
   "notes": [
     "文件按核心版本命名（hotfixes/v<coreVersion>.json）；apply.py 只加载与传入版本同名的文件。",
@@ -14,7 +14,8 @@
     "card.py 的 _friendly_error 新增 2 条：超时类报错映射成可操作短句；未识别的报错只取日志最后一行。上游 text[-300:] + 前端 slice(0,120) 会把整段 [sender] 日志的开头当错误显示，真正原因反而被截掉。",
     "精确绑定（2.0.3 新增 6 条）：现场两台 TodooCard 的广播名都是 TodooCard、manufacturer data 都是 4c 11 b9 01 13，上游 _scan_once / _scan_card 的 fallback 会按 devs.items() 顺序挑第一台（RSSI 强的先出现），导致「唤醒 A、去连 B」。已绑定 device_id 时只接受精确 UUID 匹配，扫不到就明确报「没看到已绑定的卡片」并引导唤醒/重新扫描绑定，绝不静默连错设备；未绑定时保留兜底发现，首次扫描选卡仍可用。device_id 支持逗号分隔多个 UUID（为别名注册表预留：macOS peripheral UUID 会轮换），日志打出 匹配=exact/fallback 和真实 UUID。UUID 变化后必须重新扫描绑定，无法自动反推 MAC。",
     "多设备别名登记（2.0.4 新增 6 条 card.py 补丁 + assets/web/devices.html 静态页）：card.json 增加 device_alias 与 devices（别名/MAC/UUID 列表/显示名），save_cfg 白名单放行；新增 /devices 管理页与 /api/card/devices{,/scan,/register,/select,/adopt,/remove}。切换别名时把该别名登记过的所有 UUID 逗号拼接写回 device_id，复用 2.0.3 的精确匹配（绝不 fallback），上游 send()/_scan_card()/pair 完全不改。MAC 只能人工登记（macOS BLE 广播里没有 MAC，GATT 0x2A25 读超时）；UUID 轮换后扫到未知 UUID，用「归到此别名」追加即可恢复。不登记任何别名时，行为与旧版单卡 device_id 完全一致。",
-    "思源备份同步（2.0.4）：核心目录刻意放在思源 data/ 外面，card.json 不会被思源备份带走。因此注册表另存一份到 <SiYuan>/data/plugins/plugin-todoocard/todoocard-devices.json（schema/device_alias/devices/updated），落在思源自带备份与同步的范围内。启动时同步文件优先覆盖本地 card.json；每次 save_cfg 都原子写回同步文件；/api/card/devices/reload 可在恢复备份或换机后不重启核心重新载入。可用环境变量 TODOOCARD_DEVICES_FILE 覆盖路径；定位不到 data/ 或写失败时只告警，不影响本地单卡功能。注意：同步的是别名/MAC/UUID 集合，UUID 本身是每台 Mac 本地生成的，换机后需用「归到此别名」追加新 UUID。"
+    "思源备份同步（2.0.4）：核心目录刻意放在思源 data/ 外面，card.json 不会被思源备份带走。因此注册表另存一份到 <SiYuan>/data/plugins/plugin-todoocard/todoocard-devices.json（schema/device_alias/devices/updated），落在思源自带备份与同步的范围内。启动时同步文件优先覆盖本地 card.json；每次 save_cfg 都原子写回同步文件；/api/card/devices/reload 可在恢复备份或换机后不重启核心重新载入。可用环境变量 TODOOCARD_DEVICES_FILE 覆盖路径；定位不到 data/ 或写失败时只告警，不影响本地单卡功能。注意：同步的是别名/MAC/UUID 集合，UUID 本身是每台 Mac 本地生成的，换机后需用「归到此别名」追加新 UUID。",
+    "原生控制台增强（2.0.5）：2.0.4 的登记能力只在独立页 /devices，原生「设备与配对」页仍只能裸绑 UUID，发送也不问目标。2.0.5 由 apply.py:install_assets() 把 assets/web/todoocard-devices.js 幂等内联进上游 web/card.html（固定 id 的 <script> 块，内容比对更新），覆盖 scanDevices/useDevice/send/runNow：扫描结果标注已登记并支持「填入登记」，填了别名时「用这台」一步完成绑定+登记+设为当前；登记 >=2 台时发送前弹「发到哪张卡？」手动选目标，0/1 台不弹窗直接发；定时/按键自动推送保持原样。上游 server.py 只静态服务 card.html / scenes.html，所以选内联而非外链，无需新增后端路由或改 22 条补丁。card.html 缺失或 </body> 不唯一时 apply.py 直接失败，绝不静默丢功能。后端没有 2.0.4 接口时脚本降级：不弹选择、登记区提示升级，原有单卡流程不受影响。"
   ],
   "patches": [
     {

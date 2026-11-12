@@ -98,7 +98,8 @@ for f in "$WORK/stage/eink/server.py" "$WORK/stage/eink/requirements.txt" \
          "$WORK/stage/eink/sender.py" \
          "$WORK/stage/extension/apply.py" "$WORK/stage/extension/extension.json" \
          "$WORK/stage/extension/hotfixes/v1.0.11.json" \
-         "$WORK/stage/extension/assets/web/devices.html" "$PY_BIN"; do
+         "$WORK/stage/extension/assets/web/devices.html" \
+         "$WORK/stage/extension/assets/web/todoocard-devices.js" "$PY_BIN"; do
   [[ -f "$f" ]] || { echo "FAIL  归一化后缺少: $f" >&2; exit 1; }
 done
 echo "  OK  stage/{eink,python,extension} 布局就绪"
@@ -127,6 +128,8 @@ eink = Path(sys.argv[1])
 card = (eink / "card.py").read_text(encoding="utf-8")
 server = (eink / "server.py").read_text(encoding="utf-8")
 sender = (eink / "sender.py").read_text(encoding="utf-8")
+js = (eink / "web" / "todoocard-devices.js").read_text(encoding="utf-8")
+html = (eink / "web" / "card.html").read_text(encoding="utf-8")
 checks = [
     ("force-python helper", "def _todoocard_force_python() -> bool:" in card),
     ("pair_python", "async def _pair_python(self, device_id: str) -> bool:" in card),
@@ -163,6 +166,19 @@ checks = [
     ("思源备份同步写入", "_todoocard_persist_devices(self.cfg)" in card),
     ("思源备份恢复", "_todoocard_restore_devices(cfg)" in card),
     ("静态管理页已安装", (eink / "web" / "devices.html").is_file()),
+    # 原生控制台内联增强（2.0.5）
+    ("增强脚本独立副本", (eink / "web" / "todoocard-devices.js").is_file()),
+    ("原生控制台已内联增强脚本", '<script id="todoocard-devices-inline">' in html),
+    ("内联内容与独立副本一致", js in html),
+    ("脚本在 </body> 之前", html.find('<script id="todoocard-devices-inline">') < html.rfind("</body>")),
+    ("只注入一份", html.count('<script id="todoocard-devices-inline">') == 1),
+    ("配对时登记别名", "登记并设为当前" in js and "/api/card/devices/register" in js),
+    ("扫描结果可填入登记", "填入登记" in js),
+    ("发送时多设备选择", "发到哪张卡？" in js),
+    ("仅一台不弹选择", "reg.devices.length < 2" in js),
+    ("包装 send", "window.send = async function" in js),
+    ("包装 useDevice", "window.useDevice = async function" in js),
+    ("包装 scanDevices", "window.scanDevices = async function" in js),
 ]
 for label, ok in checks:
     print(f"  {'OK  ' if ok else 'FAIL'} {label}")

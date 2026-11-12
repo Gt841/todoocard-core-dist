@@ -53,12 +53,34 @@
 | `card.py` `_friendly_error` 新增超时映射 + 兜底只取最后一行 | 上游 `text[-300:]` 把整段 `[sender]` 日志写进 `history.message`，前端 `slice(0,120)` 又截的是**开头**，用户只看到「payload 197711 bytes…等广播」，真正的失败原因被吞掉 |
 | `sender.py` / `card.py` 精确绑定（6 条） | 现场两台 TodooCard 广播名都是 `TodooCard`、厂商数据都是 `4c 11 b9 01 13`，上游 `_scan_once` / `_scan_card` 的 fallback 会挑 `devs.items()` 里第一个（RSSI 强的先出现），造成「唤醒 A、去连 B」。已绑定时只认精确 UUID，扫不到就明确报错并引导重新绑定；`device_id` 支持逗号分隔多个 UUID，日志标 `匹配=exact/fallback` |
 | `card.py` 多设备别名登记（8 条）+ 静态管理页 | 多台卡片用自定义别名管理，人工登记 MAC 与一组 macOS UUID；切换别名时把 UUID 集合写回 `device_id`，注册表另存到思源工作区随其自带备份同步（详见下节） |
+| 原生控制台内联增强（2.0.5，`assets/web/todoocard-devices.js`） | 把登记别名做进「设备与配对」的扫描/「用这台」流程；登记 ≥2 台时发送前弹「发到哪张卡？」手动选目标，只有 1 台则不弹选择。幂等内联进 `web/card.html`，不动 22 条补丁、不加后端路由 |
 
-## 多设备支持（2.0.4）
+## 多设备支持（2.0.4 / 2.0.5）
 
 电脑旁放两台以上 TodooCard 时，上游按广播顺序挑设备会「唤醒 A、去连 B」。2.0.4 引入
 **别名注册表**：给每张卡起一个自定义别名，把「别名 ↔ 蓝牙 MAC ↔ 一组 macOS UUID」人工登记下来，
-发送时只认当前别名登记过的 UUID，绝不连到别的卡。
+发送时只认当前别名登记过的 UUID，绝不连到别的卡。2.0.5 把登记入口和发送选择做进原生控制台。
+
+### 原生控制台：配对时登记别名 / 发送时选设备（2.0.5）
+
+2.0.4 的登记能力只在独立页 `/devices`，原生「设备与配对」页仍只能「用这台」裸绑 UUID，
+发送也不问目标。2.0.5 由 `apply.py:install_assets()` 把一段自包含 JS **幂等内联进上游
+`web/card.html`**（固定 id 的 `<script>` 块，内容比对后整块更新），刷新控制台即可用：
+
+| 场景 | 行为 |
+| --- | --- |
+| 「设备与配对」→ 扫描附近设备 | 改走 `/api/card/devices/scan` 结构化结果，每台标注「已登记 / 未登记」，多出「填入登记」按钮 |
+| 扫描结果点「用这台」 | 登记表单填了别名 → 一步完成「绑定 UUID + 登记别名 + 设为当前」；没填则保留上游裸绑定，并把 UUID 自动填进表单引导登记 |
+| 不扫描直接登记 | 表单 UUID 留空时自动取当前已绑定的 `device_id`，方便给老绑定补起名字 |
+| 点「发送这个模板」/ 每日计划「执行」 | 登记 **≥2 台** 才弹「发到哪张卡？」手动选择，选中后按别名切换当前目标再发送；**只有 1 台或未登记时不弹窗，直接发送** |
+| 定时推送 / 按键唤醒自动推送 | 后端自动执行，不弹窗，发到当前选中的卡 |
+| 已登记列表 | 「设为当前」「删除」「从思源备份重新载入」以及通往 `/devices` 的入口都在同一页 |
+
+选中后会把该别名登记过的所有 UUID 写回 `device_id`，复用 2.0.3 的精确匹配，
+绝不 fallback 到另一台卡。选**内联而非外链**是因为上游 `server.py` 只静态服务
+`card.html` / `scenes.html`，内联无需新增后端路由；`card.html` 缺失或 `</body>` 不唯一时
+`apply.py` 直接失败，绝不静默丢功能。后端没有 2.0.4 接口时脚本降级：不弹选择、登记区提示升级，
+原有单卡流程不受影响。
 
 ### 打开管理页
 
@@ -126,11 +148,11 @@
 ## 目录
 
 ```
-extension/apply.py            文本补丁器（锚点断言 + 幂等 + compile/py_compile + 失败不落盘 + 版本专属 hotfix + 静态资源安装）
+extension/apply.py            文本补丁器（锚点断言 + 幂等 + compile/py_compile + 失败不落盘 + 版本专属 hotfix + 静态资源安装 + 控制台脚本内联）
 extension/extension.json      targetCoreVersion / targetCoreCommit / 11 条锚点
 extension/hotfixes/           v<coreVersion>.json：按版本+commit 双重门控的热修复（当前 v1.0.11-hotfix-1，22 条）
-extension/assets/web/         devices.html：多设备登记页，apply.py 安装到核心 web/
-extension/tests/              unittest：真实 fixture / 漂移 / 幂等 / 版本不符 / hotfix 门控 / 精确绑定 / 注册表 / 备份同步
+extension/assets/web/         devices.html：多设备登记页；todoocard-devices.js：控制台增强脚本（两者由 apply.py 装进核心 web/，后者另内联进 card.html）
+extension/tests/              unittest：真实 fixture / 漂移 / 幂等 / 版本不符 / hotfix 门控 / 精确绑定 / 注册表 / 备份同步 / 控制台内联
 scripts/build-extension.sh    打 extension-<ver>.zip + sha256
 scripts/build-manifest.sh     拉三资产算 sha → manifest.json（REFRESH=1 强制重下）
 scripts/verify.sh             本地端到端（不启 BLE）
@@ -162,11 +184,11 @@ bash scripts/verify.sh --skip-pip         # 完整链路去掉 --skip-pip
 Pages 托管来源为 `main` 分支根目录；仓库根放 `.nojekyll`，避免 Jekyll 改写 `manifest.json`。
 **更新 manifest 只需 push 到 `main`**，等 Pages 重新构建即可，插件仓库不用动。
 
-> **热修复（manifest `version: 2.0.4`）**：扩展包内容更新了，但 `coreVersion` 仍是 `1.0.11`；
+> **热修复（manifest `version: 2.0.5`）**：扩展包内容更新了，但 `coreVersion` 仍是 `1.0.11`；
 > 插件按 `coreVersion` 比较版本，会显示「已是最新版本」。已装过核心的用户必须在控制台点
 > **「强制重装」** 才会拉到带 hotfix 的扩展包——重装流程会自动停核心、下载、打补丁、原子替换并重启。
-> `2.0.4` 在 2.0.3 的精确绑定之上加入**多设备别名登记**与**思源备份同步**；不登记别名时
-> 单卡行为不变。`coreVersion` 不变，因此每次内容更新都必须「强制重装」才生效。
+> `2.0.5` 在 2.0.4 之上把**登记别名做原生配对流程**、**发送时多设备手动选择**；不登记别名时
+> 单卡行为不变，只有一台卡也不会弹选择。`coreVersion` 不变，因此每次内容更新都必须「强制重装」才生效。
 
 仍待人工完成：真机 BLE 全链路验证、插件发版 / 思源集市 PR（见 `../plugin-todoocard/docs/real-machine-validation.md`）。
 

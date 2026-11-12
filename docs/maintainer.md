@@ -82,7 +82,8 @@ exec 出来实测超时/多行日志/已知错误三种输出）、`test_12`（�
 实测「另一台先出现也只认绑定卡」「绑定的卡没出现就返回 None」「未绑定仍可兜底」「多 UUID 命中」）、
 `test_13`（绑定失败提示是短句、日志标 exact/fallback、后台自动配对也不许连错卡）、
 `test_14`（同文件 marker 互不相交，防止幂等误判）、`test_15`（登记/合并/去重/别名切换/
-思源备份文件写入与换机恢复，直接 exec 注入的模块级函数）、`test_16`（静态页安装且幂等、API 与同步钩子齐全）。
+思源备份文件写入与换机恢复，直接 exec 注入的模块级函数）、`test_16`（静态页安装且幂等、API 与同步钩子齐全）、
+`test_17`（控制台脚本内联、幂等、换版本整块更新、功能点齐全）、`test_18`（card.html 漂移/缺失直接失败）。
 
 ## 多设备别名登记与思源备份（2.0.4）
 
@@ -100,15 +101,36 @@ exec 出来实测超时/多行日志/已知错误三种输出）、`test_12`（�
 - **marker 防撞**：apply.py 按「文件内是否已有 marker」判幂等，所以同文件内任一 marker
   都不得出现在其他补丁的 replacement 文本里，`test_14` 专门守这条。
 
+
+## 原生控制台内联增强（2.0.5）
+
+2.0.4 的登记能力只在独立页 `/devices`，用户实际用的是原生 `web/card.html` 的「设备与配对」页
+（只有「用这台」裸绑 UUID）和「发送这个模板」按钮（不问目标）。2.0.5 补上这两处：
+
+- `assets/web/todoocard-devices.js` 由 `install_assets()` 复制到核心 `web/`，并**内联进
+  `web/card.html` 的 `</body>` 前**（固定 id `todoocard-devices-inline` 的 `<script>` 块）。
+  按块内容比对：相同则跳过（幂等），不同则整块替换（未来改 JS 无需新锚点）。
+- 包装 `scanDevices`（改走结构化 `/api/card/devices/scan`，结果标注归属、加「填入登记」）、
+  `useDevice`（填了别名就一步 register+select，否则保留上游绑定并引导登记）、
+  `send` / `runNow`（登记 ≥2 台时弹选择器 → `/api/card/devices/select` → 再调原函数；
+  0/1 台不弹窗）。定时与按键唤醒的自动推送是后端行为，不拦。
+- 上游 `server.py` 只静态服务 `card.html` / `scenes.html`，所以选内联而非外链，
+  **不改 22 条 hotfix、不加后端路由、不动 server.py**。
+- `card.html` 缺失或 `</body>` 不唯一 → `inject_console_script()` 抛 `PatchError`，
+  安装器据此中止，绝不静默丢掉功能；脚本内含 `</script` 字面量也直接拒绝注入。
+- 后端无 2.0.4 接口时全部降级（`/api/card/devices` 拿不到 → 不弹选择、登记区提示升级）。
+- 验证：`node --check` 语法 + Node 最小 DOM mock 冒烟（1 台直发 / 2 台弹选择 / 取消不发送 /
+  配对一步登记 / 扫描填入登记）+ `test_17` / `test_18` + `verify.sh` 12 条前端断言。
+
 **发布注意**：hotfix 只改扩展包内容，`coreVersion` 不变，插件按 `coreVersion` 比较会判定
 「已是最新」。已装用户必须点控制台的**「强制重装」**；manifest 的 `version`（`2.0.0` →
-`2.0.1` → `2.0.2` → `2.0.3` → `2.0.4`）仅作为内容标识，不参与更新判定。
+`2.0.1` → `2.0.2` → `2.0.3` → `2.0.4` → `2.0.5`）仅作为内容标识，不参与更新判定。
 
 ## manifest v2 schema
 
 ```json
 {
-  "version": "2.0.4",
+  "version": "2.0.5",
   "coreVersion": "1.0.11",
   "coreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "coreTag": "v1.0.11-macos",
