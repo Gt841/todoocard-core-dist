@@ -17,7 +17,8 @@
     3. 每条改动先断言上游原文锚点在目标文件里「恰好出现 1 次」；
     4. 已注入标记存在则跳过（幂等）；
     5. 落盘前用 compile() 预检语法，落盘后用 py_compile 复核；
-       任一编译失败则不写入任何文件。
+       任一编译失败则不写入任何文件；
+    6. assets/ 下的静态资源在补丁全部成功后才安装到核心目录（不参与编译、幂等）。
 
 版本专属 hotfix（hotfixes/v<coreVersion>.json）：
     除基础补丁外，按核心版本加载同名 hotfix 文件，并二次核对文件内的
@@ -186,6 +187,32 @@ def load_extension(ext_path: Path) -> dict:
 
 
 HOTFIX_DIR = Path(__file__).with_name("hotfixes")
+ASSETS_DIR = Path(__file__).with_name("assets")
+
+
+def install_assets(eink_dir: Path) -> list[str]:
+    """把扩展包里的静态资源装进核心目录（2.0.4：web/devices.html 多设备登记页）。
+
+    不在 patch 体系内：HTML 不参与 compile/py_compile，只在源码补丁全部落盘、
+    编译复核成功之后才复制。assets/ 不存在就跳过，旧扩展包与未来新版本不受影响；
+    内容一致时不重复写（幂等）。
+    """
+    if not ASSETS_DIR.is_dir():
+        return []
+    logs: list[str] = []
+    for src in sorted(ASSETS_DIR.rglob("*")):
+        if not src.is_file() or "__pycache__" in src.parts:
+            continue
+        rel = src.relative_to(ASSETS_DIR)
+        dst = eink_dir / rel
+        data = src.read_bytes()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.is_file() and dst.read_bytes() == data:
+            logs.append(f"资源已存在 {rel}（幂等）")
+        else:
+            dst.write_bytes(data)
+            logs.append(f"安装资源 {rel}")
+    return logs
 
 
 def load_hotfix(
@@ -328,6 +355,8 @@ def apply_extension(
         except py_compile.PyCompileError as e:
             raise CompileError(f"{name} py_compile 失败: {e}") from e
 
+    # 静态资源只在所有源码补丁都成功落盘、编译复核之后才安装。
+    log.extend(install_assets(eink_dir))
     return log
 
 

@@ -52,16 +52,85 @@
 | `card.py` 占位卡 `R.FS["title"]` → `36` | `card_render` 的 `FS` 是 float 缩放因子、不是字号字典，照片文件夹为空时 `/api/card/preview?kind=photo` 必 500 |
 | `card.py` `_friendly_error` 新增超时映射 + 兜底只取最后一行 | 上游 `text[-300:]` 把整段 `[sender]` 日志写进 `history.message`，前端 `slice(0,120)` 又截的是**开头**，用户只看到「payload 197711 bytes…等广播」，真正的失败原因被吞掉 |
 | `sender.py` / `card.py` 精确绑定（6 条） | 现场两台 TodooCard 广播名都是 `TodooCard`、厂商数据都是 `4c 11 b9 01 13`，上游 `_scan_once` / `_scan_card` 的 fallback 会挑 `devs.items()` 里第一个（RSSI 强的先出现），造成「唤醒 A、去连 B」。已绑定时只认精确 UUID，扫不到就明确报错并引导重新绑定；`device_id` 支持逗号分隔多个 UUID，日志标 `匹配=exact/fallback` |
+| `card.py` 多设备别名登记（8 条）+ 静态管理页 | 多台卡片用自定义别名管理，人工登记 MAC 与一组 macOS UUID；切换别名时把 UUID 集合写回 `device_id`，注册表另存到思源工作区随其自带备份同步（详见下节） |
+
+## 多设备支持（2.0.4）
+
+电脑旁放两台以上 TodooCard 时，上游按广播顺序挑设备会「唤醒 A、去连 B」。2.0.4 引入
+**别名注册表**：给每张卡起一个自定义别名，把「别名 ↔ 蓝牙 MAC ↔ 一组 macOS UUID」人工登记下来，
+发送时只认当前别名登记过的 UUID，绝不连到别的卡。
+
+### 打开管理页
+
+核心启动后访问 `http://127.0.0.1:8199/devices`：
+
+1. 点「扫描 8 秒」，长按卡片背面按钮 5 秒唤醒要登记的那台；
+2. 在扫描结果里点「填入」拿到它的 macOS UUID；
+3. 填**别名**（如 `客厅卡`）和**蓝牙 MAC**（小程序显示的 `FFFF99803616`，即 `FF:FF:99:80:36:16`）；
+4. 点「登记」，勾「设为当前」即立刻生效；换卡时在「已登记的卡片」里点「设为当前」。
+
+扫描结果会标注「已登记 / 未登记」。macOS 的 peripheral UUID 会随配对或系统变化，出现新的
+未登记 UUID 时用「归到此别名」追加即可，不用重新填 MAC。
+
+### 数据结构
+
+`card.json` 新增两个字段；**不登记任何别名时，行为与旧版单卡 `device_id` 完全一致**：
+
+```json
+{
+  "device_alias": "客厅卡",
+  "device_id": "519D2FA1-…,C3B1E61E-…",
+  "device_name": "客厅卡 | FF:FF:99:80:36:16",
+  "devices": [
+    {"alias": "客厅卡", "mac": "FF:FF:99:80:36:16", "name": "TodoCard | FFFF99803616",
+     "uuids": ["519D2FA1-CB32-3C08-C409-EB8EB66DAAE1"]}
+  ]
+}
+```
+
+切换别名时，核心把该别名登记过的所有 UUID 逗号拼接写回 `device_id`，复用 2.0.3 的精确匹配；
+`send()` / `_scan_card()` / 配对流程等上游代码完全不用改。
+
+### 随思源备份同步
+
+核心目录刻意放在思源 `data/` **外面**（否则思源同步会覆盖核心程序），所以 `card.json`
+不在思源备份范围内。注册表另存一份到思源工作区：
+
+```
+<SiYuan>/data/plugins/plugin-todoocard/todoocard-devices.json
+```
+
+- 位于 `data/` 内 → **直接用思源自带的备份 / 同步**带走，不需要另做云同步；
+- 核心启动时同步文件优先覆盖本地 `card.json`；每次配置落盘都原子写回同步文件；
+- 恢复备份或换机后，在管理页点「从思源备份重新载入」即可还原，不用重启核心；
+- 路径可用环境变量 `TODOOCARD_DEVICES_FILE` 覆盖；定位不到 `data/` 或写入失败只告警，不影响本地功能。
+
+**注意**：同步的是别名 / MAC / UUID 集合。UUID 是每台 Mac 本地生成的，换机后很可能不同，
+用「归到此别名」追加新 UUID 即可；两台机器同时改动时由思源自己的冲突处理决定。
+
+### API
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/devices` | 多设备登记页（`assets/web/devices.html` 由 `apply.py` 装进核心 `web/`） |
+| GET | `/api/card/devices` | 注册表 / 当前别名 / 同步文件路径与状态 |
+| POST | `/api/card/devices/scan` | 结构化蓝牙扫描，标注每个 UUID 的归属别名 |
+| POST | `/api/card/devices/register` | 人工登记（同 MAC 或同别名合并，UUID 去重） |
+| POST | `/api/card/devices/select` | 按别名切换当前卡片 |
+| POST | `/api/card/devices/adopt` | 把轮换后的新 UUID 追加到某别名 |
+| POST | `/api/card/devices/reload` | 从思源备份同步文件重新载入 |
+| POST | `/api/card/devices/remove` | 删除一个别名 |
 
 **「其他版本不执行」是代码级保证**：`apply.py` 只加载 `hotfixes/v<coreVersion>.json`，再逐字段核对文件内的 `targetCoreVersion` / `targetCoreCommit`；文件名、版本、commit 任一不符即跳过、不注入。整个扩展包本身也只声明 `1.0.11` + 固定 commit，其他版本在全局断言处直接拒绝。上游发新版时必须另建 fixture、锚点与（如需要）新的 `v<ver>.json`，**不要复用 v1.0.11 的 hotfix**。
 
 ## 目录
 
 ```
-extension/apply.py            文本补丁器（锚点断言 + 幂等 + compile/py_compile + 失败不落盘 + 版本专属 hotfix）
+extension/apply.py            文本补丁器（锚点断言 + 幂等 + compile/py_compile + 失败不落盘 + 版本专属 hotfix + 静态资源安装）
 extension/extension.json      targetCoreVersion / targetCoreCommit / 11 条锚点
-extension/hotfixes/           v<coreVersion>.json：按版本+commit 双重门控的热修复（当前 v1.0.11-hotfix-1，14 条）
-extension/tests/              unittest：真实 fixture / 漂移 / 幂等 / 版本不符 / hotfix 门控 / 缺文件
+extension/hotfixes/           v<coreVersion>.json：按版本+commit 双重门控的热修复（当前 v1.0.11-hotfix-1，22 条）
+extension/assets/web/         devices.html：多设备登记页，apply.py 安装到核心 web/
+extension/tests/              unittest：真实 fixture / 漂移 / 幂等 / 版本不符 / hotfix 门控 / 精确绑定 / 注册表 / 备份同步
 scripts/build-extension.sh    打 extension-<ver>.zip + sha256
 scripts/build-manifest.sh     拉三资产算 sha → manifest.json（REFRESH=1 强制重下）
 scripts/verify.sh             本地端到端（不启 BLE）
@@ -93,13 +162,11 @@ bash scripts/verify.sh --skip-pip         # 完整链路去掉 --skip-pip
 Pages 托管来源为 `main` 分支根目录；仓库根放 `.nojekyll`，避免 Jekyll 改写 `manifest.json`。
 **更新 manifest 只需 push 到 `main`**，等 Pages 重新构建即可，插件仓库不用动。
 
-> **热修复（manifest `version: 2.0.3`）**：扩展包内容更新了，但 `coreVersion` 仍是 `1.0.11`；
+> **热修复（manifest `version: 2.0.4`）**：扩展包内容更新了，但 `coreVersion` 仍是 `1.0.11`；
 > 插件按 `coreVersion` 比较版本，会显示「已是最新版本」。已装过核心的用户必须在控制台点
 > **「强制重装」** 才会拉到带 hotfix 的扩展包——重装流程会自动停核心、下载、打补丁、原子替换并重启。
-> `2.0.3` 新增**精确绑定**：配置了 `device_id` 时只连精确匹配的那台卡，绝不 fallback 到另一台；
-> 扫不到会明确报「没找到已绑定的那张卡」并引导重新扫描绑定。`device_id` 可写逗号分隔的多个
-> UUID（macOS peripheral UUID 会轮换），为「别名 ↔ MAC ↔ 一组 UUID」的注册表预留。
-> **注意**：macOS 蓝牙广播里拿不到 MAC，UUID 变化后仍需人工重新绑定，不能自动反推设备真身。
+> `2.0.4` 在 2.0.3 的精确绑定之上加入**多设备别名登记**与**思源备份同步**；不登记别名时
+> 单卡行为不变。`coreVersion` 不变，因此每次内容更新都必须「强制重装」才生效。
 
 仍待人工完成：真机 BLE 全链路验证、插件发版 / 思源集市 PR（见 `../plugin-todoocard/docs/real-machine-validation.md`）。
 

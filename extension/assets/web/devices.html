@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>土豆片 · 多设备登记</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#f6f7f9; color:#1f2329; font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 20px 60px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }
+  h1 { font-size:22px; margin:0; }
+  h2 { font-size:16px; margin:0 0 12px; }
+  a { color:#2563eb; text-decoration:none; }
+  section { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:18px; margin-bottom:16px; }
+  .note { background:#fff8e6; border-color:#f2d99b; }
+  .note b { color:#8a5a00; }
+  .muted { color:#6b7280; font-size:13px; }
+  .current { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+  .kv { background:#f8fafc; border:1px solid #eef1f5; border-radius:8px; padding:10px 12px; }
+  .kv .k { color:#6b7280; font-size:12px; }
+  .kv .v { font-weight:600; word-break:break-all; }
+  button { border:1px solid #d1d5db; background:#fff; color:#1f2329; border-radius:6px;
+           padding:6px 12px; cursor:pointer; font:inherit; }
+  button:hover { background:#f3f4f6; }
+  button.primary { background:#2563eb; border-color:#2563eb; color:#fff; }
+  button.primary:hover { background:#1d4ed8; }
+  button.danger { color:#b91c1c; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input, select { border:1px solid #d1d5db; border-radius:6px; padding:6px 9px; font:inherit; width:100%; background:#fff; }
+  .form { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; align-items:end; }
+  .form label { display:block; font-size:12px; color:#6b7280; margin-bottom:4px; }
+  .form .full { grid-column:1 / -1; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #eef1f5; vertical-align:middle; }
+  th { color:#6b7280; font-weight:500; background:#fafbfc; }
+  code { background:#f1f5f9; padding:1px 5px; border-radius:4px; font-size:12px; word-break:break-all; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:99px; font-size:12px; background:#e8f0fe; color:#1d4ed8; }
+  .tag.new { background:#fee2e2; color:#b91c1c; }
+  #err { display:none; background:#fee2e2; color:#991b1b; border:1px solid #fecaca;
+         border-radius:8px; padding:10px 12px; margin-bottom:16px; white-space:pre-wrap; }
+  .inline { display:flex; gap:6px; align-items:center; }
+  .inline select { width:auto; min-width:110px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>多设备登记</h1>
+    <a href="/card.html">← 返回控制台</a>
+  </header>
+
+  <div id="err"></div>
+
+  <section class="note">
+    <b>为什么要人工登记：</b>macOS 的蓝牙广播里读不到 MAC 地址，两台 TodooCard 的广播名
+    （<code>TodooCard</code>）和厂商数据（<code>4c 11 b9 01 13</code>）完全一样，
+    系统给的 UUID 还会随配对/系统变化。这里把「<b>自定义别名 → 蓝牙 MAC → 一组 macOS UUID</b>」
+    登记下来；发送时只连当前别名登记过的 UUID，<b>绝不 fallback 到另一张卡</b>。<br>
+    <span class="muted">MAC 可查手机小程序里的 <code>FFFF99803616</code>（即 <code>FF:FF:99:80:36:16</code>），
+    或本机执行 <code>system_profiler SPBluetoothDataType</code>。UUID 出现新值时，在下方用「归到此别名」追加即可。</span><br>
+    <span class="muted">注册表另存一份到思源工作区 <code>data/plugins/plugin-todoocard/todoocard-devices.json</code>，
+    随思源自带备份/同步带走；恢复备份或换机后点「从思源备份重新载入」即可还原。</span>
+  </section>
+
+  <section>
+    <h2>当前生效</h2>
+    <div class="current" id="current"><div class="muted">读取中…</div></div>
+  </section>
+
+  <section>
+    <h2>1 · 扫描附近的卡片</h2>
+    <div class="inline">
+      <button id="scanBtn" class="primary">扫描 8 秒</button>
+      <span class="muted" id="scanHint">长按卡片背面按钮 5 秒唤醒后再扫，更容易出现。</span>
+    </div>
+    <table id="scanTable" style="display:none">
+      <thead><tr><th>macOS UUID</th><th>名称</th><th>RSSI</th><th>登记状态</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="muted" id="scanEmpty" style="display:none">没扫到卡片。</div>
+  </section>
+
+  <section>
+    <h2>2 · 登记一张卡</h2>
+    <div class="form">
+      <div><label>别名 *（自己起，如「客厅卡」）</label><input id="fAlias" placeholder="客厅卡"></div>
+      <div><label>蓝牙 MAC</label><input id="fMac" placeholder="FF:FF:99:80:36:16 或 FFFF99803616"></div>
+      <div><label>macOS UUID *</label><input id="fUuid" placeholder="点扫描结果里的「填入」"></div>
+      <div><label>显示名（可选）</label><input id="fName" placeholder="TodoCard | FFFF99803616"></div>
+      <div class="full">
+        <label style="margin:0"><input type="checkbox" id="fSelect" checked style="width:auto"> 登记后设为当前卡片</label>
+        <button id="regBtn" class="primary">登记</button>
+        <span class="muted">同一 MAC 或同一别名会合并到已有条目，UUID 自动去重。</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>已登记的卡片</h2>
+    <div class="inline" style="margin-bottom:8px">
+      <button id="reloadBtn">从思源备份重新载入</button>
+      <span class="muted">恢复备份或换机后点这里，不用重启核心。</span>
+    </div>
+    <table id="devTable">
+      <thead><tr><th>别名</th><th>MAC</th><th>macOS UUID（可多个）</th><th>当前</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="muted" id="devEmpty" style="display:none">还没登记任何卡片；未登记时核心仍按原来的单卡 <code>device_id</code> 工作。</div>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let state = { devices: [], device_alias: '', device_id: '', device_name: '' };
+let scanRows = [];
+
+function fail(e) {
+  const box = $('err');
+  box.textContent = (e && e.message) || String(e);
+  box.style.display = 'block';
+}
+function ok() { $('err').style.display = 'none'; }
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  };
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({ok:false, error:'返回不是 JSON'}));
+  if (!j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+function renderCurrent() {
+  $('current').innerHTML = [
+    ['当前别名', state.device_alias || '（未设置，按原 device_id 工作）'],
+    ['显示名', state.device_name || '-'],
+    ['生效的 UUID 集合', state.device_id || '-'],
+    ['已登记台数', String(state.devices.length)],
+    ['思源备份同步文件', state.sync_file || '（未定位到思源工作区）'],
+    ['同步状态', state.sync_exists ? '已写入，随思源备份/同步带走' : '尚未写入（改动配置后自动生成）']
+  ].map(([k, v]) => `<div class="kv"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+}
+
+function renderRegistry() {
+  const tbody = $('devTable').querySelector('tbody');
+  $('devEmpty').style.display = state.devices.length ? 'none' : 'block';
+  tbody.innerHTML = state.devices.map(d => {
+    const cur = d.alias === state.device_alias;
+    return `<tr>
+      <td><b>${esc(d.alias)}</b>${d.name ? `<div class="muted">${esc(d.name)}</div>` : ''}</td>
+      <td><code>${esc(d.mac || '-')}</code></td>
+      <td>${d.uuids.length ? d.uuids.map(u => `<code>${esc(u)}</code>`).join('<br>') : '<span class="muted">无</span>'}</td>
+      <td>${cur ? '<span class="tag">当前</span>' : ''}</td>
+      <td><div class="inline">
+        <button data-act="select" data-alias="${esc(d.alias)}" ${cur ? 'disabled' : ''}>设为当前</button>
+        <button class="danger" data-act="remove" data-alias="${esc(d.alias)}">删除</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+  tbody.querySelectorAll('button[data-act="select"]').forEach(b => b.onclick = () => run(() => api('/api/card/devices/select', {alias: b.dataset.alias})));
+  tbody.querySelectorAll('button[data-act="remove"]').forEach(b => b.onclick = () => {
+    if (!confirm('删除别名「' + b.dataset.alias + '」？')) return;
+    run(() => api('/api/card/devices/remove', {alias: b.dataset.alias}));
+  });
+}
+
+function renderScan() {
+  const table = $('scanTable');
+  const tbody = table.querySelector('tbody');
+  table.style.display = scanRows.length ? 'table' : 'none';
+  $('scanEmpty').style.display = scanRows.length ? 'none' : 'block';
+  const opts = state.devices.map(d => `<option value="${esc(d.alias)}">${esc(d.alias)}</option>`).join('');
+  tbody.innerHTML = scanRows.map((d, i) => `<tr>
+    <td><code>${esc(d.addr)}</code></td>
+    <td>${esc(d.name || '-')}</td>
+    <td>${esc(d.rssi == null ? '-' : d.rssi)}</td>
+    <td>${d.owner ? `<span class="tag">${esc(d.owner)}</span>` : '<span class="tag new">未登记</span>'}</td>
+    <td><div class="inline">
+      <button data-act="fill" data-i="${i}">填入</button>
+      ${!d.owner && state.devices.length ? `<select data-alias-for="${i}">${opts}</select><button data-act="adopt" data-i="${i}">归到此别名</button>` : ''}
+    </div></td>
+  </tr>`).join('');
+  tbody.querySelectorAll('button[data-act="fill"]').forEach(b => b.onclick = () => {
+    const d = scanRows[Number(b.dataset.i)];
+    $('fUuid').value = d.addr;
+    if (!$('fMac').value && !$('fAlias').value) $('fAlias').focus();
+    else $('fMac').focus();
+  });
+  tbody.querySelectorAll('button[data-act="adopt"]').forEach(b => b.onclick = () => {
+    const i = Number(b.dataset.i);
+    const sel = tbody.querySelector(`select[data-alias-for="${i}"]`);
+    run(() => api('/api/card/devices/adopt', {alias: sel.value, uuid: scanRows[i].addr}));
+  });
+}
+
+async function run(fn) {
+  ok();
+  try { await fn(); await refresh(); renderScan(); }
+  catch (e) { fail(e); }
+}
+
+async function refresh() {
+  state = await api('/api/card/devices');
+  renderCurrent();
+  renderRegistry();
+}
+
+$('scanBtn').onclick = async () => {
+  const btn = $('scanBtn');
+  btn.disabled = true; btn.textContent = '扫描中…';
+  $('scanHint').textContent = '正在扫描 8 秒，请让卡片保持唤醒…';
+  try {
+    const j = await api('/api/card/devices/scan', {});
+    scanRows = j.found || [];
+    state.devices = j.devices || state.devices;
+    ok(); renderRegistry(); renderScan();
+    $('scanHint').textContent = `扫到 ${scanRows.length} 台。`;
+  } catch (e) { fail(e); }
+  finally { btn.disabled = false; btn.textContent = '扫描 8 秒'; }
+};
+
+$('reloadBtn').onclick = () => run(() => api('/api/card/devices/reload', {}));
+
+$('regBtn').onclick = () => run(() => api('/api/card/devices/register', {
+  alias: $('fAlias').value.trim(),
+  mac: $('fMac').value.trim(),
+  uuid: $('fUuid').value.trim(),
+  name: $('fName').value.trim(),
+  select: $('fSelect').checked
+}));
+
+refresh().catch(fail);
+</script>
+</body>
+</html>

@@ -97,7 +97,8 @@ PY_BIN="$WORK/stage/python/bin/python3"
 for f in "$WORK/stage/eink/server.py" "$WORK/stage/eink/requirements.txt" \
          "$WORK/stage/eink/sender.py" \
          "$WORK/stage/extension/apply.py" "$WORK/stage/extension/extension.json" \
-         "$WORK/stage/extension/hotfixes/v1.0.11.json" "$PY_BIN"; do
+         "$WORK/stage/extension/hotfixes/v1.0.11.json" \
+         "$WORK/stage/extension/assets/web/devices.html" "$PY_BIN"; do
   [[ -f "$f" ]] || { echo "FAIL  归一化后缺少: $f" >&2; exit 1; }
 done
 echo "  OK  stage/{eink,python,extension} 布局就绪"
@@ -152,6 +153,16 @@ checks = [
     ("明确报没看到已绑定的卡", "没看到已绑定的卡片" in sender),
     ("后台自动配对也只认精确 UUID", "if bound and str(addr).upper() not in bound:" in card),
     ("绑定失败提示引导重新绑定", "没找到已绑定的那张卡" in card),
+    # 多设备别名登记 + 思源备份同步（2.0.4）
+    ("多设备默认字段", '"device_alias": ""' in card),
+    ("save_cfg 白名单放行", '"device_alias", "devices"' in card),
+    ("status 暴露注册表", '"devices": self.cfg.get("devices") or []' in card),
+    ("管理页路由", '("GET", "/devices", _devices_page)' in card),
+    ("登记 API 路由", "/api/card/devices/register" in card),
+    ("从备份重载 API", "/api/card/devices/reload" in card),
+    ("思源备份同步写入", "_todoocard_persist_devices(self.cfg)" in card),
+    ("思源备份恢复", "_todoocard_restore_devices(cfg)" in card),
+    ("静态管理页已安装", (eink / "web" / "devices.html").is_file()),
 ]
 for label, ok in checks:
     print(f"  {'OK  ' if ok else 'FAIL'} {label}")

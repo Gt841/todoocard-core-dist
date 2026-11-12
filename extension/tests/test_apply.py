@@ -200,7 +200,7 @@ class ApplyPatchTests(unittest.TestCase):
         r = run_apply(self.eink)
         self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
         self.assertIn("应用 hotfix v1.0.11-hotfix-1", r.stdout)
-        self.assertEqual(r.stdout.count("注入 hotfix "), 14)
+        self.assertEqual(r.stdout.count("注入 hotfix "), 22)
 
         sender = self.text("sender.py")
         card = self.text("card.py")
@@ -413,6 +413,140 @@ class ApplyPatchTests(unittest.TestCase):
         self.assertNotIn("519D2FA1", msg)
         self.assertLessEqual(len(msg), 120, "前端 slice(0,120) 必须能完整显示")
         self.assertEqual(friendly("[sender] 第一行\n真正的失败原因"), "真正的失败原因")
+
+    def test_14_hotfix_markers_are_disjoint(self):
+        """同文件内，任一 marker 不能出现在别的补丁的替换文本里。
+
+        否则 apply_extension 的「marker 存在即跳过」会把后面的补丁误判成已注入
+        （2.0.4 开发时真的踩到过：persist 的 marker 撞上了 helper 的 docstring）。
+        """
+        hf = json.loads(HOTFIX_JSON.read_bytes().decode("utf-8"))
+        for p in hf["patches"]:
+            for q in hf["patches"]:
+                if p["id"] == q["id"] or p["file"] != q["file"]:
+                    continue
+                with self.subTest(marker=p["id"], other=q["id"]):
+                    self.assertNotIn(
+                        p["marker"], "\n".join(q["replacement"]),
+                        "marker 撞车：后面的补丁会被幂等检查跳过",
+                    )
+
+    def test_15_device_registry_and_siyuan_backup(self):
+        """人工登记/按别名切换/UUID 归属/思源备份同步文件写入与恢复。"""
+        import logging as _logging
+        import os as _os
+        from datetime import datetime as _datetime
+
+        r = run_apply(self.eink)
+        self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
+        tree = ast.parse(self.text("card.py"))
+        names = {
+            "_todoocard_devices", "_todoocard_device_mac", "_todoocard_owner",
+            "_todoocard_upsert", "_todoocard_apply_selection", "_todoocard_sync_path",
+            "_todoocard_restore_devices", "_todoocard_persist_devices",
+        }
+        fns = [n for n in tree.body
+               if isinstance(n, ast.FunctionDef) and n.name in names]
+        self.assertEqual({n.name for n in fns}, names)
+        ns: dict = {
+            "json": json, "os": _os, "logging": _logging, "Path": Path,
+            "datetime": _datetime, "_LOGGER": _logging.getLogger("todoocard"),
+            "__file__": str(self.eink / "card.py"),
+        }
+        exec(compile(ast.Module(body=fns, type_ignores=[]),
+                     "<devices>", "exec"), ns)
+
+        U1 = "519D2FA1-CB32-3C08-C409-EB8EB66DAAE1"
+        U2 = "C3B1E61E-420D-6BB2-B6F9-5B82D2767BBA"
+        upsert = ns["_todoocard_upsert"]
+        devices, entry = upsert({}, "客厅卡", "FFFF99803616", U1, "TodoCard | FFFF99803616")
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(entry["mac"], "FF:FF:99:80:36:16", "12 位 hex 应补成冒号形式")
+
+        # 同一 MAC 换个名字再登记 → 必须合并，不能产生重复条目
+        devices2, entry2 = upsert({"devices": devices}, "另一个名字", "FF:FF:99:80:36:16", U2)
+        self.assertEqual(len(devices2), 1)
+        self.assertEqual(entry2["alias"], "客厅卡")
+        self.assertEqual(entry2["uuids"], [U1, U2])
+        # 重复 UUID 去重
+        devices3, entry3 = upsert({"devices": devices2}, "客厅卡", "FF:FF:99:80:36:16", U1)
+        self.assertEqual(entry3["uuids"], [U1, U2])
+        with self.assertRaises(ValueError):
+            upsert({}, "", "AA:BB", U1)
+
+        owner = ns["_todoocard_owner"]
+        self.assertEqual(owner(devices3, U2.lower()), "客厅卡")
+        self.assertEqual(owner(devices3, "UNKNOWN"), "")
+
+        class FakeSvc:
+            def __init__(self, cfg):
+                self.cfg = dict(cfg)
+
+            def save_cfg(self, patch):
+                self.cfg.update(patch)
+                return self.cfg
+
+        svc = FakeSvc({"devices": devices3, "device_alias": "",
+                       "device_id": "", "device_name": ""})
+        selected = ns["_todoocard_apply_selection"](svc, "客厅卡")
+        self.assertEqual(selected["alias"], "客厅卡")
+        self.assertEqual(svc.cfg["device_id"], U1 + "," + U2,
+                         "切换别名要把该别名登记过的 UUID 全拼进 device_id")
+        self.assertEqual(svc.cfg["device_name"], "客厅卡 | FF:FF:99:80:36:16")
+        self.assertEqual(ns["_todoocard_device_mac"](svc.cfg), "FF:FF:99:80:36:16")
+
+        # 思源备份同步：写出去的文件能被「换机后的空配置」完整恢复
+        sync_file = Path(self.tmp.name) / "todoocard-devices.json"
+        old = _os.environ.get("TODOOCARD_DEVICES_FILE")
+        _os.environ["TODOOCARD_DEVICES_FILE"] = str(sync_file)
+        try:
+            self.assertTrue(ns["_todoocard_persist_devices"](svc.cfg))
+            payload = json.loads(sync_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema"], 1)
+            self.assertEqual(payload["device_alias"], "客厅卡")
+            self.assertEqual(payload["devices"][0]["uuids"], [U1, U2])
+            self.assertTrue(payload["updated"])
+
+            fresh = {"devices": [], "device_alias": "", "device_id": "", "device_name": ""}
+            self.assertTrue(ns["_todoocard_restore_devices"](fresh))
+            self.assertEqual(fresh["device_alias"], "客厅卡")
+            self.assertEqual(fresh["device_id"], U1 + "," + U2)
+            self.assertEqual(fresh["devices"][0]["mac"], "FF:FF:99:80:36:16")
+        finally:
+            if old is None:
+                _os.environ.pop("TODOOCARD_DEVICES_FILE", None)
+            else:
+                _os.environ["TODOOCARD_DEVICES_FILE"] = old
+
+    def test_16_devices_page_installed_and_routes_present(self):
+        """扩展包必须把管理页装进核心 web/，且 card.py 里 API/同步钩子齐全。"""
+        r = run_apply(self.eink)
+        self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
+        page = self.eink / "web" / "devices.html"
+        self.assertTrue(page.is_file())
+        self.assertEqual(page.read_bytes(),
+                         (EXT_DIR / "assets" / "web" / "devices.html").read_bytes())
+        self.assertIn("多设备登记", page.read_text(encoding="utf-8"))
+        self.assertIn("从思源备份重新载入", page.read_text(encoding="utf-8"))
+
+        r2 = run_apply(self.eink)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("资源已存在", r2.stdout, "静态资源安装也必须幂等")
+
+        card = self.text("card.py")
+        for needle in (
+            '"device_alias": ""',
+            '"device_alias", "devices"',
+            '"devices": self.cfg.get("devices") or []',
+            '("GET", "/devices", _devices_page)',
+            "/api/card/devices/register",
+            "/api/card/devices/reload",
+            "_todoocard_persist_devices(self.cfg)",
+            "_todoocard_restore_devices(cfg)",
+            "TODOOCARD_DEVICES_FILE",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, card)
 
 
 if __name__ == "__main__":

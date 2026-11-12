@@ -51,10 +51,10 @@
 ## 版本专属 hotfix
 
 `extension/hotfixes/v<coreVersion>.json` 存放只对该上游版本成立的修复。当前只有
-`v1.0.11.json`（`v1.0.11-hotfix-1`，14 条）：给 `sender.py` 的所有 BLE await 套
+`v1.0.11.json`（`v1.0.11-hotfix-1`，22 条）：给 `sender.py` 的所有 BLE await 套
 `asyncio.wait_for(..., WRITE_TIMEOUT=8s)`，修 `card.py` 占位卡的 `R.FS["title"]`，
 让 `_friendly_error` 把超时错误翻译成可操作短句、其余未识别报错只取日志最后一行，
-以及精确绑定 6 条（见下）。
+精确绑定 6 条，以及多设备别名登记 / 思源备份同步 8 条（见下）。
 
 **精确绑定（2.0.3）**：现场两台 TodooCard 的广播名都是 `TodooCard`、厂商数据都是
 `4c 11 b9 01 13`，上游 `_scan_once` / `_scan_card` 的 fallback 会按 `devs.items()`
@@ -80,17 +80,35 @@
 `test_09`（锚点漂移）、`test_10`（缺 sender.py）、`test_11`（把 `_friendly_error` 单独
 exec 出来实测超时/多行日志/已知错误三种输出）、`test_12`（用假 bleak 注入两台同名卡，
 实测「另一台先出现也只认绑定卡」「绑定的卡没出现就返回 None」「未绑定仍可兜底」「多 UUID 命中」）、
-`test_13`（绑定失败提示是短句、日志标 exact/fallback、后台自动配对也不许连错卡）。
+`test_13`（绑定失败提示是短句、日志标 exact/fallback、后台自动配对也不许连错卡）、
+`test_14`（同文件 marker 互不相交，防止幂等误判）、`test_15`（登记/合并/去重/别名切换/
+思源备份文件写入与换机恢复，直接 exec 注入的模块级函数）、`test_16`（静态页安装且幂等、API 与同步钩子齐全）。
+
+## 多设备别名登记与思源备份（2.0.4）
+
+- `card.json` 增 `device_alias` / `devices`；`save_cfg` 白名单放行，`status()` 暴露给前端。
+- 切换别名时把该别名登记过的 UUID 逗号拼接写回 `device_id`，复用 2.0.3 精确匹配，
+  **上游 send()/_scan_card()/pair 一行都不用改**；不登记别名时单卡行为不变。
+- 管理页 `assets/web/devices.html` 由 `apply.py:install_assets()` 在补丁全部成功后装到
+  核心 `web/`（不参与 compile/py_compile，内容一致时不重复写）。构建脚本必须把 `assets/` 打进 zip。
+- 核心目录在思源 `data/` 外面（否则会被思源同步覆盖），注册表因此另存一份到
+  `<SiYuan>/data/plugins/plugin-todoocard/todoocard-devices.json`，靠思源自带备份/同步带走。
+  启动时同步文件优先；`_save_cfg()` 每次原子写回；`/api/card/devices/reload` 用于换机恢复。
+  环境变量 `TODOOCARD_DEVICES_FILE` 可覆盖路径。
+- MAC 只能人工登记（macOS BLE 广播无 MAC、GATT `0x2A25` 读超时）；UUID 轮换后用
+  `/api/card/devices/adopt` 追加。两台机器同时改动由思源自己的冲突处理决定。
+- **marker 防撞**：apply.py 按「文件内是否已有 marker」判幂等，所以同文件内任一 marker
+  都不得出现在其他补丁的 replacement 文本里，`test_14` 专门守这条。
 
 **发布注意**：hotfix 只改扩展包内容，`coreVersion` 不变，插件按 `coreVersion` 比较会判定
 「已是最新」。已装用户必须点控制台的**「强制重装」**；manifest 的 `version`（`2.0.0` →
-`2.0.1` → `2.0.2` → `2.0.3`）仅作为内容标识，不参与更新判定。
+`2.0.1` → `2.0.2` → `2.0.3` → `2.0.4`）仅作为内容标识，不参与更新判定。
 
 ## manifest v2 schema
 
 ```json
 {
-  "version": "2.0.3",
+  "version": "2.0.4",
   "coreVersion": "1.0.11",
   "coreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "coreTag": "v1.0.11-macos",
