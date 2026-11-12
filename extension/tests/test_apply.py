@@ -161,7 +161,7 @@ class ApplyPatchTests(unittest.TestCase):
         r2 = run_apply(self.eink)
         self.assertEqual(r2.returncode, 0, r2.stderr)
         self.assertIn("跳过 hotfix", r2.stdout)
-        self.assertIn("跳过 hotfix sender-control-writes", r2.stdout)
+        self.assertIn("跳过 hotfix sender-handshake-retry", r2.stdout)
         for name in after_first:
             self.assertEqual((self.eink / name).read_bytes(), after_first[name],
                              f"{name} 第二次运行被改动了")
@@ -207,7 +207,7 @@ class ApplyPatchTests(unittest.TestCase):
         r = run_apply(self.eink)
         self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
         self.assertIn("应用 hotfix v1.0.11-hotfix-1", r.stdout)
-        self.assertEqual(r.stdout.count("注入 hotfix "), 22)
+        self.assertEqual(r.stdout.count("注入 hotfix "), 21)
 
         sender = self.text("sender.py")
         card = self.text("card.py")
@@ -229,6 +229,15 @@ class ApplyPatchTests(unittest.TestCase):
             sender,
         )
         self.assertGreaterEqual(sender.count("await asyncio.wait_for("), 3)
+
+        # 2.0.6：控制点写要能兜住「固件不回 ATT Response」，并允许断线重连重试
+        self.assertIn("TODOOCARD-HANDSHAKE-RETRY", sender)
+        self.assertIn('write_mode = {"response": True}', sender)
+        self.assertIn("带响应写 2.5s 没回执，改用不带响应重发", sender)
+        self.assertIn('client.write_gatt_char(control, data, response=False)', sender)
+        self.assertIn("握手超时", sender)
+        self.assertIn("断开重连后再试", sender)
+        self.assertIn("client, device = await _connect(bleak, device_id,", sender)
 
         self.assertNotIn('R.FS["title"]', card)
         self.assertIn('font=_font("bold", 36), fill=WHITE', card)
@@ -359,6 +368,10 @@ class ApplyPatchTests(unittest.TestCase):
             manufacturer_data = {0x5053: b"\x4c\x11\xb9\x01\x13"}
 
         class Dev:
+            # 复刻 bleak 3.x 的 BLEDevice：带 __slots__，挂不上自定义属性。
+            # 旧实现在真机上就是这样静默把「匹配=exact」丢了（日志一直是 unknown）。
+            __slots__ = ("address", "name")
+
             def __init__(self, addr):
                 self.address = addr
                 self.name = "TodooCard"
@@ -376,17 +389,19 @@ class ApplyPatchTests(unittest.TestCase):
         hit = scan([OTHER, BOUND], BOUND)          # 另一台先出现
         self.assertIsNotNone(hit)
         self.assertEqual(hit.address, BOUND)
-        self.assertEqual(hit._todoocard_match, "exact")
+        self.assertEqual(scan_once.last["match"], "exact")
+        self.assertEqual(scan_once.last["addr"], BOUND)
 
         self.assertIsNone(scan([OTHER], BOUND), "绑定的卡没出现时绝不能连另一台")
+        self.assertIsNone(scan_once.last, "没命中时不能留下上一轮的匹配信息")
 
         fb = scan([OTHER], None)
         self.assertIsNotNone(fb, "未绑定时仍要能发现卡片用于首次绑定")
-        self.assertEqual(fb._todoocard_match, "fallback")
+        self.assertEqual(scan_once.last["match"], "fallback")
 
         hit2 = scan([OTHER], f"{BOUND},{OTHER}")
         self.assertEqual(hit2.address, OTHER)
-        self.assertEqual(hit2._todoocard_match, "exact")
+        self.assertEqual(scan_once.last["match"], "exact")
 
     def test_13_bound_error_is_actionable_and_scan_card_is_exact(self):
         """报错要说人话、日志要能区分 exact/fallback，后台自动配对也不许连错卡。"""
@@ -612,6 +627,151 @@ class ApplyPatchTests(unittest.TestCase):
         r2 = run_apply(self.eink)
         self.assertNotEqual(r2.returncode, 0)
         self.assertIn("card.html", r2.stderr + r2.stdout)
+
+
+    # ── 2.0.6 握手兜底：真机复现「连上了但卡片不回 ATT 响应」──────────────
+
+    CONTROL_UUID = "0000fef1-0000-1000-8000-00805f9b34fb"
+    DATA_UUID = "0000fef2-0000-1000-8000-00805f9b34fb"
+
+    def test_19_handshake_falls_back_and_reconnects(self):
+        """复现现场故障：卡片不回 ATT Write Response（日志 21:31:55 → 21:32:03）。
+
+        真机上是「已连接并验证通过 → 订阅通知成功 → 写 0x01 查块大小 → 8s 无响应」。
+        CoreBluetooth 一条连接只允许一个未完成的 ATT 请求，卡住后原地重试无效。
+        这里用假 bleak 跑真实的 send()，验证两条兜底路径：
+          A) 带响应写不回执 → 改用 Write Command，卡片照常回 block size，不用重连；
+          B) 整条连接都不响应 → 断开重连，在新连接上握手成功。
+        """
+        import asyncio as _asyncio
+        import types as _types
+
+        r = run_apply(self.eink)
+        self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
+        ns: dict = {"__name__": "sender_fake"}
+        exec(compile(self.text("sender.py"), "sender.py", "exec"), ns)
+        send = ns["send"]
+        CONTROL, DATA = self.CONTROL_UUID, self.DATA_UUID
+
+        class Char:
+            def __init__(self, uuid, props):
+                self.uuid = uuid
+                self.properties = props
+
+        class Service:
+            def __init__(self, chars):
+                self.characteristics = chars
+
+        class Peripheral:
+            # 同 bleak 3.x：BLEDevice 带 __slots__
+            __slots__ = ("address", "name", "details")
+
+            def __init__(self, addr):
+                self.address = addr
+                self.name = "TodooCard"
+
+        class Adv:
+            rssi = -55
+            local_name = "TodooCard"
+            manufacturer_data = {0x5053: b"\x4c\x11\xb9\x01\x13"}
+
+        class FakeClient:
+            """控制点 0x01 回 blockSize=20（可达 16），数据块一到就回显影确认。"""
+
+            instances: list = []
+            silent_control = False      # True：这条连接对控制点写一律不理（模拟没进接收窗口）
+            ack_control = False         # True：固件会回 ATT Write Response
+
+            def __init__(self, target=None, timeout=None, services=None):
+                self.writes = []
+                self.bytes = 0
+                self._cb = None
+                type(self).instances.append(self)
+
+            async def connect(self): pass
+            async def disconnect(self): pass
+
+            @property
+            def services(self):
+                return [Service([Char(CONTROL, ["notify", "write", "write-without-response"]),
+                                 Char(DATA, ["write", "write-without-response"])])]
+
+            @property
+            def mtu_size(self):
+                return 247
+
+            async def read_gatt_char(self, ch):
+                return bytearray(b"TodooCard T3 firmware")
+
+            async def start_notify(self, ch, cb):
+                self._cb = cb
+
+            async def stop_notify(self, ch): pass
+
+            async def write_gatt_char(self, ch, data, response):
+                data = bytes(data)
+                self.writes.append((ch.uuid, response, data))
+                if ch.uuid != CONTROL:
+                    self.bytes += len(data)
+                    if self._cb:
+                        self._cb(None, bytearray([0x05, 0x08]))
+                    return
+                if self.silent_control:
+                    if response:
+                        raise _asyncio.TimeoutError     # 永不回执
+                    return                             # Write Command 被静默丢弃
+                if response and not self.ack_control:
+                    raise _asyncio.TimeoutError
+                if data[:1] == b"\x01" and self._cb:
+                    self._cb(None, bytearray([0x01, 20, 0x00]))
+
+        def make_bleak(client_cls):
+            class Scanner:
+                @staticmethod
+                async def discover(timeout, return_adv):
+                    return {"ADDR": (Peripheral("ADDR"), Adv())}
+            return _types.SimpleNamespace(BleakClient=client_cls, BleakScanner=Scanner)
+
+        payload = Path(self.tmp.name) / "p.bin"
+        payload.write_bytes(b"\x01" * 40)      # 40 字节 + blockSize 16 → 3 块
+
+        def run_send(client_cls):
+            client_cls.instances.clear()
+            saved = sys.modules.get("bleak")
+            sys.modules["bleak"] = make_bleak(client_cls)
+            try:
+                return _asyncio.run(send(payload, "ADDR", log=lambda *_: None, timeout=6.0))
+            finally:
+                if saved is None:
+                    sys.modules.pop("bleak", None)
+                else:
+                    sys.modules["bleak"] = saved
+
+        # A) 带响应不回执，但 Write Command 能送到
+        class ClientA(FakeClient):
+            instances: list = []
+
+        res = run_send(ClientA)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["blocks"], 3)
+        self.assertEqual(len(ClientA.instances), 1, "A 情形不该重连")
+        modes = [w[1] for w in ClientA.instances[0].writes if w[0] == CONTROL]
+        self.assertEqual(modes[:2], [True, False],
+                         "带响应写不通时必须改用 Write Command 重发")
+
+        # B) 整条连接都不响应 → 必须断开重连，在新连接上握手
+        class ClientB(FakeClient):
+            instances: list = []
+
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.mine = len(type(self).instances) - 1
+                self.silent_control = self.mine == 0
+
+        res_b = run_send(ClientB)
+        self.assertTrue(res_b["ok"], res_b)
+        self.assertGreaterEqual(len(ClientB.instances), 2, "卡住后必须换一条连接再试")
+        self.assertGreater(ClientB.instances[-1].bytes, 0, "重连后的那条连接要真的把数据写完")
 
 
 if __name__ == "__main__":

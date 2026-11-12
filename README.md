@@ -54,6 +54,7 @@
 | `sender.py` / `card.py` 精确绑定（6 条） | 现场两台 TodooCard 广播名都是 `TodooCard`、厂商数据都是 `4c 11 b9 01 13`，上游 `_scan_once` / `_scan_card` 的 fallback 会挑 `devs.items()` 里第一个（RSSI 强的先出现），造成「唤醒 A、去连 B」。已绑定时只认精确 UUID，扫不到就明确报错并引导重新绑定；`device_id` 支持逗号分隔多个 UUID，日志标 `匹配=exact/fallback` |
 | `card.py` 多设备别名登记（8 条）+ 静态管理页 | 多台卡片用自定义别名管理，人工登记 MAC 与一组 macOS UUID；切换别名时把 UUID 集合写回 `device_id`，注册表另存到思源工作区随其自带备份同步（详见下节） |
 | 原生控制台内联增强（2.0.5，`assets/web/todoocard-devices.js`） | 把登记别名做进「设备与配对」的扫描/「用这台」流程；登记 ≥2 台时发送前弹「发到哪张卡？」手动选目标，只有 1 台则不弹选择。幂等内联进 `web/card.html`，不动 22 条补丁、不加后端路由 |
+| `sender.py` 握手兜底（2.0.6） | 真机：连上、订阅通知都成功，但写 `0x01` 查块大小 **8s 没有 ATT 响应**。CoreBluetooth 一条连接只允许一个未完成的 ATT 请求，卡住后原地重试无效——改成「带响应写 2.5s 不回执 → 改用 Write Command → 还不行断开重连」，45s 内多轮重试；日志打出控制点/数据点属性、协商 MTU、读 FEF3 链路自检 |
 
 ## 多设备支持（2.0.4 / 2.0.5）
 
@@ -150,7 +151,7 @@
 ```
 extension/apply.py            文本补丁器（锚点断言 + 幂等 + compile/py_compile + 失败不落盘 + 版本专属 hotfix + 静态资源安装 + 控制台脚本内联）
 extension/extension.json      targetCoreVersion / targetCoreCommit / 11 条锚点
-extension/hotfixes/           v<coreVersion>.json：按版本+commit 双重门控的热修复（当前 v1.0.11-hotfix-1，22 条）
+extension/hotfixes/           v<coreVersion>.json：按版本+commit 双重门控的热修复（当前 v1.0.11-hotfix-1，21 条）
 extension/assets/web/         devices.html：多设备登记页；todoocard-devices.js：控制台增强脚本（两者由 apply.py 装进核心 web/，后者另内联进 card.html）
 extension/tests/              unittest：真实 fixture / 漂移 / 幂等 / 版本不符 / hotfix 门控 / 精确绑定 / 注册表 / 备份同步 / 控制台内联
 scripts/build-extension.sh    打 extension-<ver>.zip + sha256
@@ -184,11 +185,12 @@ bash scripts/verify.sh --skip-pip         # 完整链路去掉 --skip-pip
 Pages 托管来源为 `main` 分支根目录；仓库根放 `.nojekyll`，避免 Jekyll 改写 `manifest.json`。
 **更新 manifest 只需 push 到 `main`**，等 Pages 重新构建即可，插件仓库不用动。
 
-> **热修复（manifest `version: 2.0.5`）**：扩展包内容更新了，但 `coreVersion` 仍是 `1.0.11`；
+> **热修复（manifest `version: 2.0.6`）**：扩展包内容更新了，但 `coreVersion` 仍是 `1.0.11`；
 > 插件按 `coreVersion` 比较版本，会显示「已是最新版本」。已装过核心的用户必须在控制台点
 > **「强制重装」** 才会拉到带 hotfix 的扩展包——重装流程会自动停核心、下载、打补丁、原子替换并重启。
-> `2.0.5` 在 2.0.4 之上把**登记别名做原生配对流程**、**发送时多设备手动选择**；不登记别名时
-> 单卡行为不变，只有一台卡也不会弹选择。`coreVersion` 不变，因此每次内容更新都必须「强制重装」才生效。
+> `2.0.6` 修**真机发送失败**：连上后写控制点 `0x01` 等不到 ATT 响应（macOS 日志 8s 超时）。
+> 现在带响应写不通就改 Write Command，再不行断开重连重试，45 秒内反复试；发送时请长按卡片
+> 背面按钮 5 秒让它进接收窗口。`coreVersion` 不变，因此每次内容更新都必须「强制重装」才生效。
 
 仍待人工完成：真机 BLE 全链路验证、插件发版 / 思源集市 PR（见 `../plugin-todoocard/docs/real-machine-validation.md`）。
 

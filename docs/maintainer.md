@@ -51,7 +51,7 @@
 ## 版本专属 hotfix
 
 `extension/hotfixes/v<coreVersion>.json` 存放只对该上游版本成立的修复。当前只有
-`v1.0.11.json`（`v1.0.11-hotfix-1`，22 条）：给 `sender.py` 的所有 BLE await 套
+`v1.0.11.json`（`v1.0.11-hotfix-1`，21 条）：给 `sender.py` 的所有 BLE await 套
 `asyncio.wait_for(..., WRITE_TIMEOUT=8s)`，修 `card.py` 占位卡的 `R.FS["title"]`，
 让 `_friendly_error` 把超时错误翻译成可操作短句、其余未识别报错只取日志最后一行，
 精确绑定 6 条，以及多设备别名登记 / 思源备份同步 8 条（见下）。
@@ -115,22 +115,58 @@ exec 出来实测超时/多行日志/已知错误三种输出）、`test_12`（�
   `send` / `runNow`（登记 ≥2 台时弹选择器 → `/api/card/devices/select` → 再调原函数；
   0/1 台不弹窗）。定时与按键唤醒的自动推送是后端行为，不拦。
 - 上游 `server.py` 只静态服务 `card.html` / `scenes.html`，所以选内联而非外链，
-  **不改 22 条 hotfix、不加后端路由、不动 server.py**。
+  **不动其它 hotfix、不加后端路由、不动 server.py**。
 - `card.html` 缺失或 `</body>` 不唯一 → `inject_console_script()` 抛 `PatchError`，
   安装器据此中止，绝不静默丢掉功能；脚本内含 `</script` 字面量也直接拒绝注入。
 - 后端无 2.0.4 接口时全部降级（`/api/card/devices` 拿不到 → 不弹选择、登记区提示升级）。
 - 验证：`node --check` 语法 + Node 最小 DOM mock 冒烟（1 台直发 / 2 台弹选择 / 取消不发送 /
   配对一步登记 / 扫描填入登记）+ `test_17` / `test_18` + `verify.sh` 12 条前端断言。
 
+## 握手兜底：设备不回 ATT 响应（2.0.6）
+
+真机日志（2026-11-12 21:31:48 ~ 21:32:03）暴露的一条硬故障：
+
+```
+[sender] 已连接并验证通过（对象）
+[sender] 请求 block size
+WARNING 发送失败: block size 控制点写入 8s 无响应
+```
+
+连接成功、`start_notify(control)` 也成功（CCCD 写有回执），但紧接着对 `0xFEF1` 的
+**第一条 Write Request 拿不到 ATT Response**。关键点在 CoreBluetooth 的语义：一条连接同时
+只允许一个未完成的 ATT 请求，这条写一旦挂住，后面所有带响应写都排在它后面——所以
+「原地重试」和「把超时调大」都没用，只能换连接或者不要求响应。
+
+2.0.6 的处理：
+
+- `write_control()` 先带响应写 **2.5s**（能确认就确认），超时立刻改用 **Write Command**
+  （`response=False`，ATT 层不需要回执，命令照样送达）。数据阶段本来就是不带响应写。
+- 还拿不到 block size → **断开重连**（`_connect` 重新等广播），在新连接上继续，`write_mode`
+  记住已退到 Write Command，后续轮次不再浪费 2.5s。总预算 45 秒，用户中途长按按钮
+  把卡片唤醒到接收窗口，任意一轮就能接上。
+- 每轮打印诊断：控制点/数据点 UUID 与 `properties`、协商后的 `mtu_size`、以及读 `0xFEF3`
+  （不受保护）判断 ATT 读通道是否活着。真机再出问题，这几行就能区分「链路死」「特征值不回执」
+  「配对/加密失效」。
+- 失败文案指向两条真实动作：长按 5 秒唤醒；仍不行就去 系统设置 → 蓝牙 移除 TodooCard 重新配对
+  （macOS 没有显式配对 API，只能在访问受保护特征值时隐式配对，配对信息坏了就表现为写挂住）。
+
+顺带修了一个静默 bug：`_scan_once` 原先用 `dev._todoocard_match = ...` 记匹配方式，但 bleak 3.x
+的 `BLEDevice` 带 `__slots__ = ("address", "name", "details")`，赋值抛 `AttributeError` 被
+`except` 吞掉——现场日志里一直是「匹配=unknown」，等于精确绑定的日志证据全丢。现在改成记在
+`_scan_once.last`（函数属性）上，`test_12` 的假设备也换成带 `__slots__` 的类，防止再退化。
+
+`test_19` 用假 bleak 跑真实 `send()`，覆盖两条兜底路径：带响应不通→改 Write Command 后同一条
+连接完成；整条连接都不响应→必须断开重连并在新连接上写完数据。
+
 **发布注意**：hotfix 只改扩展包内容，`coreVersion` 不变，插件按 `coreVersion` 比较会判定
 「已是最新」。已装用户必须点控制台的**「强制重装」**；manifest 的 `version`（`2.0.0` →
-`2.0.1` → `2.0.2` → `2.0.3` → `2.0.4` → `2.0.5`）仅作为内容标识，不参与更新判定。
+`2.0.1` → `2.0.2` → `2.0.3` → `2.0.4` → `2.0.5` → `2.0.6`）仅作为内容标识，不参与更新判定。
 
 ## manifest v2 schema
 
 ```json
 {
-  "version": "2.0.5",
+  "version": "2.0.6",
   "coreVersion": "1.0.11",
   "coreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "coreTag": "v1.0.11-macos",

@@ -179,6 +179,16 @@ checks = [
     ("包装 send", "window.send = async function" in js),
     ("包装 useDevice", "window.useDevice = async function" in js),
     ("包装 scanDevices", "window.scanDevices = async function" in js),
+    # 握手兜底（2.0.6）：真机复现「连上了但卡片不回 ATT Write Response」
+    ("握手重试已注入", "TODOOCARD-HANDSHAKE-RETRY" in sender),
+    ("带响应写失败改 Write Command", 'client.write_gatt_char(control, data, response=False)' in sender),
+    ("写不通会断开重连", "client, device = await _connect(bleak, device_id," in sender),
+    ("握手超时给明确提示", "握手超时" in sender),
+    ("握手超时映射成短句", "卡片不响应：长按背面按钮 5 秒再发" in card),
+    ("链路自检读 FEF3", "0000fef3-0000-1000-8000-00805f9b34fb" in sender),
+    # 匹配方式不再挂 BLEDevice（bleak 3.x 的 __slots__ 会吞掉 setattr）
+    ("匹配方式记在函数属性上", "_scan_once.last = None" in sender),
+    ("扫描日志读函数属性", 'info = getattr(_scan_once, "last", None) or {}' in sender),
 ]
 for label, ok in checks:
     print(f"  {'OK  ' if ok else 'FAIL'} {label}")
