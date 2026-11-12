@@ -1,0 +1,92 @@
+{
+  "extensionVersion": "1.0.11",
+  "targetCoreVersion": "1.0.11",
+  "targetCoreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
+  "sourceTag": "v1.0.11-macos",
+  "sourceUrl": "https://github.com/shidaifufen/todoocard-eink/archive/3642b4b25e42e38776f3227db601474173f915b1.tar.gz",
+  "sourceSha256": "6afea74358af29ed3fe160560b9b409f030ab3aae25d485166617e8ed076cdd9",
+  "notes": [
+    "上游不存在 v1.0.11 tag；sourceUrl 按 commit sha 钉死，sourceTag 仅作展示/追溯。",
+    "v1.0.11-macos 与 v1.0.11-windows 的 card.py/server.py/sender.py/requirements.txt blob 完全相同，故锚点只需一套。",
+    "每条 anchor 的 lines 以换行连接成精确字符串，apply.py 断言它在目标文件中恰好出现 1 次。",
+    "不注入 _scan_python（上游 _scan_card 与 _scan 的 bleak 分支已自包含）；不修 sender/output-key（上游已修）；pick_folders 的平台分支保持原样。"
+  ],
+  "anchors": [
+    {
+      "id": "card-import-os",
+      "file": "card.py",
+      "lines": ["import logging", "import random"]
+    },
+    {
+      "id": "card-force-helper",
+      "file": "card.py",
+      "lines": ["_LOGGER = logging.getLogger(\"todoocard\")"]
+    },
+    {
+      "id": "card-pair-python",
+      "file": "card.py",
+      "lines": ["    def _scan_card(self) -> dict | None:"]
+    },
+    {
+      "id": "card-gate-build-payload",
+      "file": "card.py",
+      "lines": [
+        "    def _build_payload(self, image_path: Path) -> dict:",
+        "        if sys.platform != \"darwin\":"
+      ]
+    },
+    {
+      "id": "card-gate-send-blocking",
+      "file": "card.py",
+      "lines": [
+        "    def _send_blocking(self, image_path: Path, wait_sec: float | None = None) -> dict:",
+        "        if sys.platform != \"darwin\":"
+      ]
+    },
+    {
+      "id": "card-gate-scan",
+      "file": "card.py",
+      "lines": [
+        "    async def _scan(request):",
+        "        svc = current()",
+        "        if sys.platform != \"darwin\":"
+      ]
+    },
+    {
+      "id": "card-gate-pair-session",
+      "file": "card.py",
+      "lines": [
+        "        async def _run():",
+        "            try:",
+        "                if sys.platform != \"darwin\":",
+        "                    ok = await self._pair_bleak(dev)"
+      ]
+    },
+    {
+      "id": "card-gate-run-pair",
+      "file": "card.py",
+      "lines": [
+        "    async def _run_pair(self, device_id: str) -> bool:",
+        "        if sys.platform != \"darwin\":"
+      ]
+    },
+    {
+      "id": "card-gate-pair-api",
+      "file": "card.py",
+      "lines": [
+        "            if sys.platform != \"darwin\":",
+        "                ok = await svc._pair_bleak(str(dev))"
+      ]
+    },
+    {
+      "id": "server-host-bind",
+      "file": "server.py",
+      "lines": ["PORT = int(os.environ.get(\"PORT\", \"8199\"))"]
+    },
+    {
+      "id": "server-tcpsite",
+      "file": "server.py",
+      "lines": ["    site = web.TCPSite(runner, \"0.0.0.0\", PORT)"]
+    }
+  ]
+}
