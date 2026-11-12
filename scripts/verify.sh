@@ -142,6 +142,9 @@ checks = [
     ("订阅通知限时", "asyncio.wait_for(client.start_notify" in sender),
     ("断连限时", "asyncio.wait_for(client.disconnect(), timeout=WRITE_TIMEOUT)" in sender),
     ("占位卡字号已修", 'R.FS["title"]' not in card),
+    # 发送失败弹窗要显示真正原因，而不是 [sender] 日志开头
+    ("超时错误映射成短句", "卡片没回应蓝牙指令" in card),
+    ("兜底只取日志最后一行", "lines = [ln.strip() for ln in text.splitlines()" in card),
 ]
 for label, ok in checks:
     print(f"  {'OK  ' if ok else 'FAIL'} {label}")

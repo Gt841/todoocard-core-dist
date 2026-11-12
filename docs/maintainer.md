@@ -51,8 +51,10 @@
 ## 版本专属 hotfix
 
 `extension/hotfixes/v<coreVersion>.json` 存放只对该上游版本成立的修复。当前只有
-`v1.0.11.json`（`v1.0.11-hotfix-1`，6 条）：给 `sender.py` 的所有 BLE await 套
-`asyncio.wait_for(..., WRITE_TIMEOUT=8s)`，并修 `card.py` 占位卡的 `R.FS["title"]`。
+`v1.0.11.json`（`v1.0.11-hotfix-1`，8 条）：给 `sender.py` 的所有 BLE await 套
+`asyncio.wait_for(..., WRITE_TIMEOUT=8s)`，修 `card.py` 占位卡的 `R.FS["title"]`，
+并让 `_friendly_error` 把超时错误翻译成可操作短句、其余未识别报错只取日志最后一行
+（否则「发送失败」弹窗只显示 `[sender] payload … 等广播` 这种日志开头，看不到原因）。
 
 触发原因（2026-11-12 真机）：macOS CoreBluetooth 的 `write_gatt_char(..., response=True)`
 在卡片不回 ATT Write Response 时会永远挂起，`sender.send()` 不返回 → `card.py:send()` 的
@@ -67,17 +69,18 @@
 4. hotfix 每条同样走「锚点恰好 1 次 / marker 幂等 / 编译预检」，漂移即非 0 且不落盘。
 
 测试：`test_07`（注入与编译）、`test_08`（其他版本/其他 commit/空目录都不注入）、
-`test_09`（锚点漂移）、`test_10`（缺 sender.py）。
+`test_09`（锚点漂移）、`test_10`（缺 sender.py）、`test_11`（把 `_friendly_error` 单独
+exec 出来实测超时/多行日志/已知错误三种输出）。
 
 **发布注意**：hotfix 只改扩展包内容，`coreVersion` 不变，插件按 `coreVersion` 比较会判定
-「已是最新」。已装用户必须点控制台的**「强制重装」**；manifest 的 `version` 从 `2.0.0` bump
-到 `2.0.1` 仅作为内容标识，不参与更新判定。
+「已是最新」。已装用户必须点控制台的**「强制重装」**；manifest 的 `version`（`2.0.0` →
+`2.0.1` → `2.0.2`）仅作为内容标识，不参与更新判定。
 
 ## manifest v2 schema
 
 ```json
 {
-  "version": "2.0.1",
+  "version": "2.0.2",
   "coreVersion": "1.0.11",
   "coreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "coreTag": "v1.0.11-macos",

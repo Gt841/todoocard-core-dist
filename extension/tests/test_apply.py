@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import shutil
@@ -199,7 +200,7 @@ class ApplyPatchTests(unittest.TestCase):
         r = run_apply(self.eink)
         self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
         self.assertIn("应用 hotfix v1.0.11-hotfix-1", r.stdout)
-        self.assertEqual(r.stdout.count("注入 hotfix "), 6)
+        self.assertEqual(r.stdout.count("注入 hotfix "), 8)
 
         sender = self.text("sender.py")
         card = self.text("card.py")
@@ -281,6 +282,44 @@ class ApplyPatchTests(unittest.TestCase):
         r = run_apply(self.eink)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("sender.py", r.stderr + r.stdout)
+
+
+    def test_11_friendly_error_shows_real_reason(self):
+        """发送失败弹窗必须显示真正原因，而不是 [sender] 日志的开头。
+
+        直接把打过补丁的 card.py 里的 _friendly_error 单独 exec 出来调用，
+        避免 import 整个 card.py（它依赖 Pillow / aiohttp 等运行时库）。
+        """
+        r = run_apply(self.eink)
+        self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
+
+        tree = ast.parse(self.text("card.py"))
+        node = next(n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == "_friendly_error")
+        ns: dict = {}
+        exec(compile(ast.Module(body=[node], type_ignores=[]),
+                     "<friendly_error>", "exec"), ns)
+        friendly = ns["_friendly_error"]
+
+        timeout_log = "\n".join([
+            "[sender] payload 197711 bytes, target=519D2FA1-CB32-3C08-C409-EB8EB66DAAE1",
+            "[sender] 等广播（总预算 180s）…",
+            "[sender] 看到卡片：TodooCard",
+            "[sender] 请求 block size",
+            "block size 控制点写入 8s 无响应（设备未进入接收窗口？）",
+        ])
+        msg = friendly(timeout_log)
+        self.assertIn("长按背面按钮", msg)
+        self.assertNotIn("[sender]", msg)
+        self.assertLessEqual(len(msg), 120, "弹窗 slice(0,120) 必须能完整显示")
+
+        # 未识别的多行日志 → 只给最后一行，前端 slice(0,120) 也不会截错
+        self.assertEqual(
+            friendly("[sender] 第一行日志\n[sender] 第二行日志\n真正的失败原因在这里"),
+            "真正的失败原因在这里",
+        )
+        # 已有的友好映射不能被破坏
+        self.assertIn("长按卡片背面按钮唤醒", friendly("没扫到卡片"))
 
 
 if __name__ == "__main__":

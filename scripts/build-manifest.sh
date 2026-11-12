@@ -19,7 +19,7 @@ mkdir -p "$CACHE"
 CORE_VERSION="${CORE_VERSION:-1.0.11}"
 CORE_COMMIT="${CORE_COMMIT:-3642b4b25e42e38776f3227db601474173f915b1}"
 CORE_TAG="${CORE_TAG:-v1.0.11-macos}"     # 仅展示/追溯，不参与下载
-MANIFEST_VERSION="${MANIFEST_VERSION:-2.0.1}"   # 2.0.1 = 含 v1.0.11 专属 hotfix 的扩展包；coreVersion 仍是 1.0.11，需插件「强制重装」
+MANIFEST_VERSION="${MANIFEST_VERSION:-2.0.2}"   # 2.0.2 = hotfix + 发送失败提示修复；coreVersion 仍是 1.0.11，需插件「强制重装」
 
 SOURCE_URL="https://github.com/shidaifufen/todoocard-eink/archive/${CORE_COMMIT}.tar.gz"
 

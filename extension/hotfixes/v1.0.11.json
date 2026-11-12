@@ -4,13 +4,14 @@
   "targetCoreVersion": "1.0.11",
   "targetCoreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "sourceTag": "v1.0.11-macos",
-  "description": "上游 v1.0.11 专属热修复：给 BLE 的每次 await 加超时，避免 macOS CoreBluetooth 在设备不回 ATT Write Response 时永久挂起导致核心 busy 锁死；并修正照片占位卡渲染引用了不存在的字号字典。",
+  "description": "上游 v1.0.11 专属热修复：给 BLE 的每次 await 加超时，避免 macOS CoreBluetooth 在设备不回 ATT Write Response 时永久挂起导致核心 busy 锁死；修正照片占位卡渲染引用了不存在的字号字典；让发送失败提示显示真正的报错而不是 [sender] 日志开头。",
   "appliesOnlyTo": "coreVersion == 1.0.11 且 coreCommit == 3642b4b25e42e38776f3227db601474173f915b1；其他版本一律不注入",
   "notes": [
     "文件按核心版本命名（hotfixes/v<coreVersion>.json）；apply.py 只加载与传入版本同名的文件。",
     "加载后还要逐字段核对 targetCoreVersion / targetCoreCommit，任一不符即跳过，绝不带到上游新版本。",
     "每条 patch 沿用基础补丁的契约：锚点在目标文件中恰好 1 次，已注入标记存在则跳过，落盘前后编译校验。",
-    "WRITE_TIMEOUT = 8s：控制点写入、订阅通知、数据块写入、断连全部限时；超时抛 TransferError，由 card.py 的 _send_python 捕获并返回失败，send() 的 finally 才能释放 busy。"
+    "WRITE_TIMEOUT = 8s：控制点写入、订阅通知、数据块写入、断连全部限时；超时抛 TransferError，由 card.py 的 _send_python 捕获并返回失败，send() 的 finally 才能释放 busy。",
+    "card.py 的 _friendly_error 新增 2 条：超时类报错映射成可操作短句；未识别的报错只取日志最后一行。上游 text[-300:] + 前端 slice(0,120) 会把整段 [sender] 日志的开头当错误显示，真正原因反而被截掉。"
   ],
   "patches": [
     {
@@ -162,6 +163,41 @@
       "replacement": [
         "        # TODOOCARD-HOTFIX-1.0.11: card_render 的 FS 是 float 缩放因子，不是字号字典",
         "        d.text((R.M, R.Y_HEAD), \"土豆片\", font=_font(\"bold\", 36), fill=WHITE)"
+      ]
+    },
+    {
+      "id": "card-friendly-timeout-error",
+      "file": "card.py",
+      "marker": "超时类报错给可操作提示",
+      "lines": [
+        "    if \"没收到显影确认\" in text:",
+        "        return \"数据写完但卡片没确认刷新，它可能中途休眠了；唤醒后再发一次\""
+      ],
+      "replacement": [
+        "    # TODOOCARD-HOTFIX-1.0.11: 超时类报错给可操作提示，别把整段 [sender] 日志塞进弹窗",
+        "    if any(k in text for k in (\"控制点写入\", \"订阅控制点通知超时\", \"数据块写入\")):",
+        "        return \"卡片没回应蓝牙指令：点发送后长按背面按钮 5 秒唤醒卡片，等屏幕亮起再试\"",
+        "    if \"没收到显影确认\" in text:",
+        "        return \"数据写完但卡片没确认刷新，它可能中途休眠了；唤醒后再发一次\""
+      ]
+    },
+    {
+      "id": "card-friendly-error-last-line",
+      "file": "card.py",
+      "marker": "未识别的报错只给最后一行",
+      "lines": [
+        "    if \"required 0x05/0x08\" in low:",
+        "        return \"数据写完但没收到显影确认，卡片可能已重启；稍等 30 秒再发一次\"",
+        "    return text[-300:]"
+      ],
+      "replacement": [
+        "    if \"required 0x05/0x08\" in low:",
+        "        return \"数据写完但没收到显影确认，卡片可能已重启；稍等 30 秒再发一次\"",
+        "    # TODOOCARD-HOTFIX-1.0.11: 未识别的报错只给最后一行（真正的失败原因）；",
+        "    # 上游 text[-300:] 会把整段 [sender] 日志写进 history，前端 slice(0,120)",
+        "    # 又把日志开头当错误显示，用户完全看不到原因。",
+        "    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]",
+        "    return (lines[-1] if lines else text)[-160:]"
       ]
     }
   ]
