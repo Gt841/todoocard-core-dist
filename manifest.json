@@ -1,5 +1,5 @@
 {
-  "version": "2.0.0",
+  "version": "2.0.1",
   "coreVersion": "1.0.11",
   "coreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "coreTag": "v1.0.11-macos",
@@ -10,7 +10,7 @@
       "pythonUrl": "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.11.18%2B20261110-aarch64-apple-darwin-install_only.tar.gz",
       "pythonSha256": "73f1ed14486aa278d331e95f7d6d452f5cfb69d90b418e26e62fd4846d53557d",
       "extensionUrl": "https://github.com/Gt841/todoocard-core-dist/releases/download/v1.0.11/extension-1.0.11.zip",
-      "extensionSha256": "64c0522d3ff690553306e9ed1a014b441d96475e3b3b293be14cec44e1b2abd7"
+      "extensionSha256": "6a9dd331d7b3d369f9b10c29de2add4522135463b8827ed3423343451096d27c"
     }
   }
 }

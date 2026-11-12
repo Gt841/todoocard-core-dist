@@ -95,7 +95,9 @@ else
 fi
 PY_BIN="$WORK/stage/python/bin/python3"
 for f in "$WORK/stage/eink/server.py" "$WORK/stage/eink/requirements.txt" \
-         "$WORK/stage/extension/apply.py" "$WORK/stage/extension/extension.json" "$PY_BIN"; do
+         "$WORK/stage/eink/sender.py" \
+         "$WORK/stage/extension/apply.py" "$WORK/stage/extension/extension.json" \
+         "$WORK/stage/extension/hotfixes/v1.0.11.json" "$PY_BIN"; do
   [[ -f "$f" ]] || { echo "FAIL  归一化后缺少: $f" >&2; exit 1; }
 done
 echo "  OK  stage/{eink,python,extension} 布局就绪"
@@ -123,6 +125,7 @@ from pathlib import Path
 eink = Path(sys.argv[1])
 card = (eink / "card.py").read_text(encoding="utf-8")
 server = (eink / "server.py").read_text(encoding="utf-8")
+sender = (eink / "sender.py").read_text(encoding="utf-8")
 checks = [
     ("force-python helper", "def _todoocard_force_python() -> bool:" in card),
     ("pair_python", "async def _pair_python(self, device_id: str) -> bool:" in card),
@@ -132,6 +135,13 @@ checks = [
     ("HOST 默认回环", 'HOST = os.environ.get("HOST", "127.0.0.1")' in server),
     ("TCPSite 用 HOST", "web.TCPSite(runner, HOST, PORT)" in server),
     ("旧 0.0.0.0 绑定已移除", 'web.TCPSite(runner, "0.0.0.0", PORT)' not in server),
+    # v1.0.11 专属 hotfix
+    ("WRITE_TIMEOUT 常量", "WRITE_TIMEOUT = 8.0" in sender),
+    ("控制点写入全限时", "async def write_control(data: bytes, label: str) -> None:" in sender),
+    ("0x01 不再裸写", "await client.write_gatt_char(control, bytes([CMD_REQ_BLOCK]), response=True)" not in sender),
+    ("订阅通知限时", "asyncio.wait_for(client.start_notify" in sender),
+    ("断连限时", "asyncio.wait_for(client.disconnect(), timeout=WRITE_TIMEOUT)" in sender),
+    ("占位卡字号已修", 'R.FS["title"]' not in card),
 ]
 for label, ok in checks:
     print(f"  {'OK  ' if ok else 'FAIL'} {label}")

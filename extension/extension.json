@@ -3,12 +3,14 @@
   "targetCoreVersion": "1.0.11",
   "targetCoreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "sourceTag": "v1.0.11-macos",
+  "hotfix": "v1.0.11-hotfix-1",
   "sourceUrl": "https://github.com/shidaifufen/todoocard-eink/archive/3642b4b25e42e38776f3227db601474173f915b1.tar.gz",
   "sourceSha256": "6afea74358af29ed3fe160560b9b409f030ab3aae25d485166617e8ed076cdd9",
   "notes": [
     "上游不存在 v1.0.11 tag；sourceUrl 按 commit sha 钉死，sourceTag 仅作展示/追溯。",
     "v1.0.11-macos 与 v1.0.11-windows 的 card.py/server.py/sender.py/requirements.txt blob 完全相同，故锚点只需一套。",
     "每条 anchor 的 lines 以换行连接成精确字符串，apply.py 断言它在目标文件中恰好出现 1 次。",
+    "hotfixes/v<coreVersion>.json 是版本专属热修复：apply.py 按版本文件名加载，并二次核对 targetCoreVersion / targetCoreCommit；其他版本或 commit 一律跳过、不注入。",
     "不注入 _scan_python（上游 _scan_card 与 _scan 的 bleak 分支已自包含）；不修 sender/output-key（上游已修）；pick_folders 的平台分支保持原样。"
   ],
   "anchors": [

@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "id": "v1.0.11-hotfix-1",
+  "targetCoreVersion": "1.0.11",
+  "targetCoreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
+  "sourceTag": "v1.0.11-macos",
+  "description": "上游 v1.0.11 专属热修复：给 BLE 的每次 await 加超时，避免 macOS CoreBluetooth 在设备不回 ATT Write Response 时永久挂起导致核心 busy 锁死；并修正照片占位卡渲染引用了不存在的字号字典。",
+  "appliesOnlyTo": "coreVersion == 1.0.11 且 coreCommit == 3642b4b25e42e38776f3227db601474173f915b1；其他版本一律不注入",
+  "notes": [
+    "文件按核心版本命名（hotfixes/v<coreVersion>.json）；apply.py 只加载与传入版本同名的文件。",
+    "加载后还要逐字段核对 targetCoreVersion / targetCoreCommit，任一不符即跳过，绝不带到上游新版本。",
+    "每条 patch 沿用基础补丁的契约：锚点在目标文件中恰好 1 次，已注入标记存在则跳过，落盘前后编译校验。",
+    "WRITE_TIMEOUT = 8s：控制点写入、订阅通知、数据块写入、断连全部限时；超时抛 TransferError，由 card.py 的 _send_python 捕获并返回失败，send() 的 finally 才能释放 busy。"
+  ],
+  "patches": [
+    {
+      "id": "sender-timeout-constant",
+      "file": "sender.py",
+      "marker": "WRITE_TIMEOUT = 8.0        # TODOOCARD-HOTFIX-1.0.11",
+      "lines": [
+        "STALL_TIMEOUT = 10.0       # 回执停滞多久算卡死"
+      ],
+      "replacement": [
+        "STALL_TIMEOUT = 10.0       # 回执停滞多久算卡死",
+        "WRITE_TIMEOUT = 8.0        # TODOOCARD-HOTFIX-1.0.11: 单次 BLE await 上限（防 CoreBluetooth 永久挂起）"
+      ]
+    },
+    {
+      "id": "sender-notify-timeout",
+      "file": "sender.py",
+      "marker": "订阅控制点通知超时",
+      "lines": [
+        "        await client.start_notify(control, on_control)"
+      ],
+      "replacement": [
+        "        # TODOOCARD-HOTFIX-1.0.11: 订阅通知也可能挂起，必须限时",
+        "        try:",
+        "            await asyncio.wait_for(client.start_notify(control, on_control),",
+        "                                   timeout=WRITE_TIMEOUT)",
+        "        except asyncio.TimeoutError as e:",
+        "            raise TransferError(\"订阅控制点通知超时（设备未进入接收窗口？）\") from e"
+      ]
+    },
+    {
+      "id": "sender-control-writes",
+      "file": "sender.py",
+      "marker": "async def write_control(data: bytes, label: str) -> None:",
+      "lines": [
+        "        log(\"[sender] 请求 block size\")",
+        "        await client.write_gatt_char(control, bytes([CMD_REQ_BLOCK]), response=True)",
+        "        if not await wait_for(lambda: state[\"block_size\"] > 0):",
+        "            raise TransferError(\"等不到 block size 响应（通知没订阅成功？）\")",
+        "        bs = state[\"block_size\"]",
+        "        log(f\"[sender] block payload = {bs} 字节\")",
+        "",
+        "        # 补齐到块大小整数倍（设备按块收）",
+        "        if len(payload) % bs:",
+        "            payload += b\"\\x00\" * (bs - len(payload) % bs)",
+        "        n_blocks = len(payload) // bs",
+        "        log(f\"[sender] 共 {n_blocks} 块\")",
+        "",
+        "        await client.write_gatt_char(control,",
+        "                                     bytes([CMD_REQ_LEN, len(payload) & 0xFF,",
+        "                                            (len(payload) >> 8) & 0xFF,",
+        "                                            (len(payload) >> 16) & 0xFF]),",
+        "                                     response=True)",
+        "        await asyncio.sleep(0.2)",
+        "        await client.write_gatt_char(control, bytes([CMD_START]), response=True)"
+      ],
+      "replacement": [
+        "        # TODOOCARD-HOTFIX-1.0.11: 所有控制点写入都套超时。macOS CoreBluetooth 的",
+        "        # writeWithResponse 在设备不回 ATT 响应时 future 永不完成，会让发送任务永久挂起、",
+        "        # card.py:send() 的 finally 无法释放 busy，之后所有发送都被 409 挡掉。",
+        "        async def write_control(data: bytes, label: str) -> None:",
+        "            try:",
+        "                await asyncio.wait_for(",
+        "                    client.write_gatt_char(control, data, response=True),",
+        "                    timeout=WRITE_TIMEOUT,",
+        "                )",
+        "            except asyncio.TimeoutError as e:",
+        "                raise TransferError(",
+        "                    f\"{label} 控制点写入 {WRITE_TIMEOUT:.0f}s 无响应\"",
+        "                    \"（设备未进入接收窗口？长按卡片背面按钮 5 秒再试）\"",
+        "                ) from e",
+        "",
+        "        log(\"[sender] 请求 block size\")",
+        "        await write_control(bytes([CMD_REQ_BLOCK]), \"block size\")",
+        "        if not await wait_for(lambda: state[\"block_size\"] > 0):",
+        "            raise TransferError(\"等不到 block size 响应（通知没订阅成功？）\")",
+        "        bs = state[\"block_size\"]",
+        "        log(f\"[sender] block payload = {bs} 字节\")",
+        "",
+        "        # 补齐到块大小整数倍（设备按块收）",
+        "        if len(payload) % bs:",
+        "            payload += b\"\\x00\" * (bs - len(payload) % bs)",
+        "        n_blocks = len(payload) // bs",
+        "        log(f\"[sender] 共 {n_blocks} 块\")",
+        "",
+        "        await write_control(",
+        "            bytes([CMD_REQ_LEN, len(payload) & 0xFF,",
+        "                   (len(payload) >> 8) & 0xFF,",
+        "                   (len(payload) >> 16) & 0xFF]),",
+        "            \"payload 长度\",",
+        "        )",
+        "        await asyncio.sleep(0.2)",
+        "        await write_control(bytes([CMD_START]), \"开始传输\")"
+      ]
+    },
+    {
+      "id": "sender-data-write-timeout",
+      "file": "sender.py",
+      "marker": "数据块写入也限时  # TODOOCARD-HOTFIX-1.0.11",
+      "lines": [
+        "                    if response_write:",
+        "                        await client.write_gatt_char(data_ch, packet, response=True)",
+        "                    else:",
+        "                        await client.write_gatt_char(data_ch, packet, response=False)",
+        "                        await asyncio.sleep(WRITE_DELAY)"
+      ],
+      "replacement": [
+        "                    # 数据块写入也限时  # TODOOCARD-HOTFIX-1.0.11",
+        "                    if response_write:",
+        "                        await asyncio.wait_for(",
+        "                            client.write_gatt_char(data_ch, packet, response=True),",
+        "                            timeout=WRITE_TIMEOUT,",
+        "                        )",
+        "                    else:",
+        "                        await asyncio.wait_for(",
+        "                            client.write_gatt_char(data_ch, packet, response=False),",
+        "                            timeout=WRITE_TIMEOUT,",
+        "                        )",
+        "                        await asyncio.sleep(WRITE_DELAY)"
+      ]
+    },
+    {
+      "id": "sender-disconnect-timeout",
+      "file": "sender.py",
+      "marker": "断连也可能挂起，必须限时",
+      "lines": [
+        "    finally:",
+        "        try:",
+        "            await client.disconnect()",
+        "        except Exception:",
+        "            pass"
+      ],
+      "replacement": [
+        "    finally:",
+        "        try:",
+        "            # TODOOCARD-HOTFIX-1.0.11: 断连也可能挂起，必须限时",
+        "            await asyncio.wait_for(client.disconnect(), timeout=WRITE_TIMEOUT)",
+        "        except Exception:",
+        "            pass"
+      ]
+    },
+    {
+      "id": "card-placeholder-font",
+      "file": "card.py",
+      "marker": "card_render 的 FS 是 float 缩放因子",
+      "lines": [
+        "        d.text((R.M, R.Y_HEAD), \"土豆片\", font=_font(\"bold\", R.FS[\"title\"]), fill=WHITE)"
+      ],
+      "replacement": [
+        "        # TODOOCARD-HOTFIX-1.0.11: card_render 的 FS 是 float 缩放因子，不是字号字典",
+        "        d.text((R.M, R.Y_HEAD), \"土豆片\", font=_font(\"bold\", 36), fill=WHITE)"
+      ]
+    }
+  ]
+}

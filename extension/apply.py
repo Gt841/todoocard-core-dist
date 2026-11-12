@@ -12,11 +12,18 @@
 
 守卫（任何一条不满足即失败，绝不静默打错补丁）：
     1. --core-version / --core-commit 必须与 extension.json 声明一致；
+       整个扩展包只配套一个上游版本，其他版本直接拒绝、不执行；
     2. extension.json 的锚点 id 集合必须与本文件 PATCHES 一致；
     3. 每条改动先断言上游原文锚点在目标文件里「恰好出现 1 次」；
     4. 已注入标记存在则跳过（幂等）；
     5. 落盘前用 compile() 预检语法，落盘后用 py_compile 复核；
        任一编译失败则不写入任何文件。
+
+版本专属 hotfix（hotfixes/v<coreVersion>.json）：
+    除基础补丁外，按核心版本加载同名 hotfix 文件，并二次核对文件内的
+    targetCoreVersion / targetCoreCommit。**任何其他版本或 commit 都不加载、
+    不注入**，因此 v1.0.11 的热修复绝不会被误用到上游新版本上。上游发新版时
+    必须另建 fixture 与锚点；若不为新版本提供 hotfix 文件，则仅执行基础补丁部分。
 """
 from __future__ import annotations
 
@@ -178,16 +185,61 @@ def load_extension(ext_path: Path) -> dict:
         raise PatchError(f"extension.json 解析失败: {e}") from e
 
 
+HOTFIX_DIR = Path(__file__).with_name("hotfixes")
+
+
+def load_hotfix(
+    core_version: str, core_commit: str, hotfix_dir: Path | None = None
+) -> tuple[dict | None, str]:
+    """按「版本文件名 + 精确 commit」加载专属 hotfix。
+
+    只认 hotfixes/v<coreVersion>.json。文件缺失、版本不符、commit 不符时返回
+    (None, 说明)，调用方跳过注入——保证 1.0.11 的热修复不会带到其他上游版本。
+    """
+    directory = hotfix_dir or HOTFIX_DIR
+    path = directory / f"v{core_version}.json"
+    if not path.is_file():
+        return None, f"跳过 hotfix：{path.name} 不存在（v1.0.11 专属补丁不适用于 v{core_version}）"
+    try:
+        hf = json.loads(path.read_bytes().decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        raise PatchError(f"hotfix 文件解析失败 {path}: {e}") from e
+    if not isinstance(hf, dict):
+        raise PatchError(f"hotfix 文件格式错误: {path}")
+    if hf.get("targetCoreVersion") != core_version:
+        return None, "跳过 hotfix：targetCoreVersion 与传入版本不一致"
+    if hf.get("targetCoreCommit") != core_commit:
+        return None, "跳过 hotfix：targetCoreCommit 与传入 commit 不一致（上游可能已漂移）"
+
+    patches = hf.get("patches")
+    if not isinstance(patches, list) or not patches:
+        raise PatchError(f"hotfix 缺少 patches: {path}")
+    seen: set[str] = set()
+    for p in patches:
+        if not isinstance(p, dict) or not all(
+            isinstance(p.get(k), str) for k in ("id", "file", "marker")
+        ):
+            raise PatchError(f"hotfix patch 字段不完整: {path}")
+        if not isinstance(p.get("lines"), list) or not isinstance(p.get("replacement"), list):
+            raise PatchError(f"hotfix patch {p['id']} 缺少 lines/replacement 数组")
+        if p["id"] in seen:
+            raise PatchError(f"hotfix patch id 重复: {p['id']}")
+        seen.add(p["id"])
+    return hf, f"应用 hotfix {hf.get('id', path.stem)}（{len(patches)} 条，仅 v{core_version}）"
+
+
 def apply_extension(
     eink_dir: Path,
     core_version: str,
     core_commit: str,
     ext_path: Path | None = None,
+    hotfix_dir: Path | None = None,
 ) -> list[str]:
     """把扩展注入 eink_dir，返回逐条日志；失败抛 PatchError 且不改动任何文件。"""
     ext_path = ext_path or Path(__file__).with_name("extension.json")
     ext = load_extension(ext_path)
 
+    # 整个扩展包绑定单一上游版本：其他版本直接拒绝，不执行任何注入。
     if core_version != ext.get("targetCoreVersion"):
         raise VersionError(
             f"coreVersion 不匹配：传入 {core_version}，扩展要求 {ext.get('targetCoreVersion')}"
@@ -210,8 +262,12 @@ def apply_extension(
         if not isinstance(anchors[patch.id].get("lines"), list):
             raise PatchError(f"锚点 {patch.id} 缺少 lines")
 
+    hotfix, hotfix_note = load_hotfix(core_version, core_commit, hotfix_dir)
+    hotfix_patches: list[dict] = hotfix["patches"] if hotfix else []
+
+    files = {"card.py", "server.py"} | {p["file"] for p in hotfix_patches}
     contents: dict[str, str] = {}
-    for name in ("card.py", "server.py"):
+    for name in sorted(files):
         target = eink_dir / name
         if not target.is_file():
             raise PatchError(f"目标目录缺少 {name}：{eink_dir}")
@@ -220,7 +276,9 @@ def apply_extension(
         except UnicodeDecodeError as e:
             raise PatchError(f"{name} 不是 UTF-8 文本: {e}") from e
 
-    log: list[str] = []
+    log: list[str] = [hotfix_note]
+
+    # 基础补丁
     for patch in PATCHES:
         text = contents[patch.file]
         if patch.marker in text:
@@ -235,6 +293,23 @@ def apply_extension(
             )
         contents[patch.file] = text.replace(anchor, patch.replacement, 1)
         log.append(f"注入 {patch.id}")
+
+    # 版本专属 hotfix：与基础补丁同一套锚点/幂等守卫
+    for hp in hotfix_patches:
+        name = hp["file"]
+        text = contents[name]
+        if hp["marker"] in text:
+            log.append(f"跳过 hotfix {hp['id']}（已注入，幂等）")
+            continue
+        anchor = "\n".join(hp["lines"])
+        count = text.count(anchor)
+        if count != 1:
+            raise AnchorError(
+                f"hotfix 锚点 {hp['id']} 在 {name} 中应恰好出现 1 次，实际 {count} 次；"
+                "上游源码可能已漂移，该版本专属补丁不注入"
+            )
+        contents[name] = text.replace(anchor, "\n".join(hp["replacement"]), 1)
+        log.append(f"注入 hotfix {hp['id']}")
 
     # 落盘前语法预检：任何编译失败都不写入，避免留下半成品核心。
     for name, text in contents.items():
@@ -262,12 +337,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--core-version", required=True, help="manifest.coreVersion")
     ap.add_argument("--core-commit", required=True, help="manifest.coreCommit")
     ap.add_argument("--extension-json", default=None, help="默认取 apply.py 同目录的 extension.json")
+    ap.add_argument("--hotfix-dir", default=None, help="默认取 apply.py 同目录的 hotfixes/（测试用）")
     args = ap.parse_args(argv)
 
     try:
         ext_path = Path(args.extension_json) if args.extension_json else None
+        hf_dir = Path(args.hotfix_dir) if args.hotfix_dir else None
         lines = apply_extension(
-            Path(args.eink_dir), args.core_version, args.core_commit, ext_path
+            Path(args.eink_dir), args.core_version, args.core_commit, ext_path, hf_dir
         )
         for line in lines:
             print(line)

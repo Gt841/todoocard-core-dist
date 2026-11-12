@@ -12,8 +12,9 @@ ZIP="$OUT/extension-$VER.zip"
 mkdir -p "$OUT"
 rm -f "$ZIP" "$ZIP.sha256"
 
-# zip 根即 apply.py / extension.json / tests/，与安装器「解压后缺 apply.py 即中止」的约定一致
-( cd "$ROOT/extension" && zip -q -r "$ZIP" apply.py extension.json tests \
+# zip 根即 apply.py / extension.json / hotfixes/ / tests/，
+# 与安装器「解压后缺 apply.py 即中止」的约定一致；hotfixes/ 必须随包分发。
+( cd "$ROOT/extension" && zip -q -r "$ZIP" apply.py extension.json hotfixes tests \
     -x '*/__pycache__/*' '*.pyc' )
 
 if command -v shasum >/dev/null 2>&1; then
