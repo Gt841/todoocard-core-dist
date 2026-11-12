@@ -51,10 +51,18 @@
 ## 版本专属 hotfix
 
 `extension/hotfixes/v<coreVersion>.json` 存放只对该上游版本成立的修复。当前只有
-`v1.0.11.json`（`v1.0.11-hotfix-1`，8 条）：给 `sender.py` 的所有 BLE await 套
+`v1.0.11.json`（`v1.0.11-hotfix-1`，14 条）：给 `sender.py` 的所有 BLE await 套
 `asyncio.wait_for(..., WRITE_TIMEOUT=8s)`，修 `card.py` 占位卡的 `R.FS["title"]`，
-并让 `_friendly_error` 把超时错误翻译成可操作短句、其余未识别报错只取日志最后一行
-（否则「发送失败」弹窗只显示 `[sender] payload … 等广播` 这种日志开头，看不到原因）。
+让 `_friendly_error` 把超时错误翻译成可操作短句、其余未识别报错只取日志最后一行，
+以及精确绑定 6 条（见下）。
+
+**精确绑定（2.0.3）**：现场两台 TodooCard 的广播名都是 `TodooCard`、厂商数据都是
+`4c 11 b9 01 13`，上游 `_scan_once` / `_scan_card` 的 fallback 会按 `devs.items()`
+顺序挑第一台（RSSI 强的先出现），造成「唤醒 A、去连 B」。现在只要 `device_id` 非空，
+就只接受精确 UUID 命中，另一台一律跳过；扫不到就报「没看到已绑定的卡片」并引导重新
+扫描绑定。`device_id` 支持逗号分隔多个 UUID（macOS peripheral UUID 会轮换），
+日志会打出 `匹配=exact/fallback` 和真实 UUID。未绑定时保留兜底发现，首次选卡仍可用。
+**注意**：macOS BLE 广播里没有 MAC，UUID 变化后必须人工重新绑定，无法自动反推设备真身。
 
 触发原因（2026-11-12 真机）：macOS CoreBluetooth 的 `write_gatt_char(..., response=True)`
 在卡片不回 ATT Write Response 时会永远挂起，`sender.send()` 不返回 → `card.py:send()` 的
@@ -70,17 +78,19 @@
 
 测试：`test_07`（注入与编译）、`test_08`（其他版本/其他 commit/空目录都不注入）、
 `test_09`（锚点漂移）、`test_10`（缺 sender.py）、`test_11`（把 `_friendly_error` 单独
-exec 出来实测超时/多行日志/已知错误三种输出）。
+exec 出来实测超时/多行日志/已知错误三种输出）、`test_12`（用假 bleak 注入两台同名卡，
+实测「另一台先出现也只认绑定卡」「绑定的卡没出现就返回 None」「未绑定仍可兜底」「多 UUID 命中」）、
+`test_13`（绑定失败提示是短句、日志标 exact/fallback、后台自动配对也不许连错卡）。
 
 **发布注意**：hotfix 只改扩展包内容，`coreVersion` 不变，插件按 `coreVersion` 比较会判定
 「已是最新」。已装用户必须点控制台的**「强制重装」**；manifest 的 `version`（`2.0.0` →
-`2.0.1` → `2.0.2`）仅作为内容标识，不参与更新判定。
+`2.0.1` → `2.0.2` → `2.0.3`）仅作为内容标识，不参与更新判定。
 
 ## manifest v2 schema
 
 ```json
 {
-  "version": "2.0.2",
+  "version": "2.0.3",
   "coreVersion": "1.0.11",
   "coreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "coreTag": "v1.0.11-macos",

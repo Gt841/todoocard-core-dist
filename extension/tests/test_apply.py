@@ -200,7 +200,7 @@ class ApplyPatchTests(unittest.TestCase):
         r = run_apply(self.eink)
         self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
         self.assertIn("应用 hotfix v1.0.11-hotfix-1", r.stdout)
-        self.assertEqual(r.stdout.count("注入 hotfix "), 8)
+        self.assertEqual(r.stdout.count("注入 hotfix "), 14)
 
         sender = self.text("sender.py")
         card = self.text("card.py")
@@ -320,6 +320,99 @@ class ApplyPatchTests(unittest.TestCase):
         )
         # 已有的友好映射不能被破坏
         self.assertIn("长按卡片背面按钮唤醒", friendly("没扫到卡片"))
+
+    def test_12_exact_binding_never_falls_back_to_another_card(self):
+        """两台卡广播名/厂商数据完全一样时，已绑定只允许精确 UUID 命中。
+
+        直接 exec 打过补丁的 _scan_once，用假 bleak 注入两台设备，验证：
+          1) 另一台先出现（RSSI 更强）也只认绑定的那台；
+          2) 绑定的卡没出现时返回 None，绝不 fallback；
+          3) 未绑定时仍可按厂商数据兜底发现（首次扫描选卡）；
+          4) 逗号分隔的多个 UUID 任一命中都算 exact（别名注册表预留）。
+        """
+        import asyncio as _asyncio
+        import types as _types
+
+        r = run_apply(self.eink)
+        self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
+        tree = ast.parse(self.text("sender.py"))
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "_scan_once")
+        ns: dict = {"asyncio": _asyncio, "SCAN_ROUND": 0.01}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]),
+                     "<scan_once>", "exec"), ns)
+        scan_once = ns["_scan_once"]
+
+        BOUND = "519D2FA1-CB32-3C08-C409-EB8EB66DAAE1"
+        OTHER = "C3B1E61E-420D-6BB2-B6F9-5B82D2767BBA"
+
+        class Adv:
+            rssi = -61
+            local_name = "TodooCard"
+            manufacturer_data = {0x5053: b"\x4c\x11\xb9\x01\x13"}
+
+        class Dev:
+            def __init__(self, addr):
+                self.address = addr
+                self.name = "TodooCard"
+
+        def fake_bleak(addrs):
+            class Scanner:
+                @staticmethod
+                async def discover(timeout, return_adv):
+                    return {a: (Dev(a), Adv()) for a in addrs}
+            return _types.SimpleNamespace(BleakScanner=Scanner)
+
+        def scan(addrs, device_id):
+            return _asyncio.run(scan_once(fake_bleak(addrs), device_id))
+
+        hit = scan([OTHER, BOUND], BOUND)          # 另一台先出现
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.address, BOUND)
+        self.assertEqual(hit._todoocard_match, "exact")
+
+        self.assertIsNone(scan([OTHER], BOUND), "绑定的卡没出现时绝不能连另一台")
+
+        fb = scan([OTHER], None)
+        self.assertIsNotNone(fb, "未绑定时仍要能发现卡片用于首次绑定")
+        self.assertEqual(fb._todoocard_match, "fallback")
+
+        hit2 = scan([OTHER], f"{BOUND},{OTHER}")
+        self.assertEqual(hit2.address, OTHER)
+        self.assertEqual(hit2._todoocard_match, "exact")
+
+    def test_13_bound_error_is_actionable_and_scan_card_is_exact(self):
+        """报错要说人话、日志要能区分 exact/fallback，后台自动配对也不许连错卡。"""
+        r = run_apply(self.eink)
+        self.assertEqual(r.returncode, 0, f"stdout={r.stdout}\nstderr={r.stderr}")
+        sender = self.text("sender.py")
+        card = self.text("card.py")
+
+        self.assertIn("没看到已绑定的卡片", sender)
+        self.assertIn("匹配={_match}", sender)
+        self.assertIn("if bound:\n            continue", sender)
+        self.assertIn("if bound and str(addr).upper() not in bound:", card)
+        self.assertNotIn(
+            'if target and str(addr).upper() != target and "todoo" not in name.lower():',
+            card,
+        )
+
+        tree = ast.parse(card)
+        node = next(n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == "_friendly_error")
+        ns: dict = {}
+        exec(compile(ast.Module(body=[node], type_ignores=[]),
+                     "<friendly_error>", "exec"), ns)
+        friendly = ns["_friendly_error"]
+        msg = friendly(
+            "[sender] payload 1 bytes\n"
+            "没看到已绑定的卡片 519D2FA1-CB32-3C08-C409-EB8EB66DAAE1（等了 180 秒）："
+            "长按卡片背面按钮 5 秒唤醒它；macOS 蓝牙 UUID 可能变化",
+        )
+        self.assertIn("重新扫描绑定", msg)
+        self.assertNotIn("519D2FA1", msg)
+        self.assertLessEqual(len(msg), 120, "前端 slice(0,120) 必须能完整显示")
+        self.assertEqual(friendly("[sender] 第一行\n真正的失败原因"), "真正的失败原因")
 
 
 if __name__ == "__main__":

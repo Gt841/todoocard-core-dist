@@ -4,14 +4,15 @@
   "targetCoreVersion": "1.0.11",
   "targetCoreCommit": "3642b4b25e42e38776f3227db601474173f915b1",
   "sourceTag": "v1.0.11-macos",
-  "description": "上游 v1.0.11 专属热修复：给 BLE 的每次 await 加超时，避免 macOS CoreBluetooth 在设备不回 ATT Write Response 时永久挂起导致核心 busy 锁死；修正照片占位卡渲染引用了不存在的字号字典；让发送失败提示显示真正的报错而不是 [sender] 日志开头。",
+  "description": "上游 v1.0.11 专属热修复：给 BLE 的每次 await 加超时，避免 macOS CoreBluetooth 在设备不回 ATT Write Response 时永久挂起导致核心 busy 锁死；修正照片占位卡渲染引用了不存在的字号字典；让发送失败提示显示真正的报错而不是 [sender] 日志开头；已绑定 device_id 时只认精确匹配，绝不 fallback 到另一台 TodooCard，避免两台卡广播名/厂商数据相同时把图发错设备。",
   "appliesOnlyTo": "coreVersion == 1.0.11 且 coreCommit == 3642b4b25e42e38776f3227db601474173f915b1；其他版本一律不注入",
   "notes": [
     "文件按核心版本命名（hotfixes/v<coreVersion>.json）；apply.py 只加载与传入版本同名的文件。",
     "加载后还要逐字段核对 targetCoreVersion / targetCoreCommit，任一不符即跳过，绝不带到上游新版本。",
     "每条 patch 沿用基础补丁的契约：锚点在目标文件中恰好 1 次，已注入标记存在则跳过，落盘前后编译校验。",
     "WRITE_TIMEOUT = 8s：控制点写入、订阅通知、数据块写入、断连全部限时；超时抛 TransferError，由 card.py 的 _send_python 捕获并返回失败，send() 的 finally 才能释放 busy。",
-    "card.py 的 _friendly_error 新增 2 条：超时类报错映射成可操作短句；未识别的报错只取日志最后一行。上游 text[-300:] + 前端 slice(0,120) 会把整段 [sender] 日志的开头当错误显示，真正原因反而被截掉。"
+    "card.py 的 _friendly_error 新增 2 条：超时类报错映射成可操作短句；未识别的报错只取日志最后一行。上游 text[-300:] + 前端 slice(0,120) 会把整段 [sender] 日志的开头当错误显示，真正原因反而被截掉。",
+    "精确绑定（2.0.3 新增 6 条）：现场两台 TodooCard 的广播名都是 TodooCard、manufacturer data 都是 4c 11 b9 01 13，上游 _scan_once / _scan_card 的 fallback 会按 devs.items() 顺序挑第一台（RSSI 强的先出现），导致「唤醒 A、去连 B」。已绑定 device_id 时只接受精确 UUID 匹配，扫不到就明确报「没看到已绑定的卡片」并引导唤醒/重新扫描绑定，绝不静默连错设备；未绑定时保留兜底发现，首次扫描选卡仍可用。device_id 支持逗号分隔多个 UUID（为别名注册表预留：macOS peripheral UUID 会轮换），日志打出 匹配=exact/fallback 和真实 UUID。UUID 变化后必须重新扫描绑定，无法自动反推 MAC。"
   ],
   "patches": [
     {
@@ -198,6 +199,165 @@
         "    # 又把日志开头当错误显示，用户完全看不到原因。",
         "    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]",
         "    return (lines[-1] if lines else text)[-160:]"
+      ]
+    },
+    {
+      "id": "sender-exact-binding",
+      "file": "sender.py",
+      "marker": "已绑定 device_id 时",
+      "lines": [
+        "async def _scan_once(bleak, device_id: str | None):",
+        "    \"\"\"扫一轮，找目标卡片。",
+        "",
+        "    优先按绑定的地址匹配；但卡片地址可能会轮换，所以也接受",
+        "    \"广播里带厂商数据 0x5053\"（TodooCard 的 company id）或名字带 todoo 的设备。",
+        "    \"\"\"",
+        "    devs = await bleak.BleakScanner.discover(timeout=SCAN_ROUND, return_adv=True)",
+        "    target = (device_id or \"\").upper()",
+        "    fallback = None",
+        "",
+        "    def _tag(dev, adv):",
+        "        # 把广播里的 rssi 挂到设备对象上，连接日志里能看到信号强度",
+        "        try:",
+        "            dev._adv_rssi = getattr(adv, \"rssi\", None)",
+        "        except Exception:",
+        "            pass",
+        "        return dev",
+        "",
+        "    for addr, (dev, adv) in devs.items():",
+        "        name = dev.name or adv.local_name or \"\"",
+        "        if target and str(addr).upper() == target:",
+        "            return _tag(dev, adv)",
+        "        if fallback is None:",
+        "            if 0x5053 in (adv.manufacturer_data or {}):",
+        "                fallback = _tag(dev, adv)",
+        "            elif \"todoo\" in name.lower():",
+        "                fallback = _tag(dev, adv)",
+        "    return fallback"
+      ],
+      "replacement": [
+        "async def _scan_once(bleak, device_id: str | None):",
+        "    \"\"\"扫一轮，找目标卡片。",
+        "",
+        "    TODOOCARD-HOTFIX-1.0.11: 已绑定 device_id 时**只接受精确匹配**，绝不 fallback。",
+        "    现场有两台 TodooCard，广播名和厂商数据（0x5053: 4c 11 b9 01 13）完全相同，",
+        "    上游按 devs.items() 顺序取第一个 fallback，RSSI 强的那台先出现，会造成",
+        "    「唤醒 A、去连 B」把图发到另一张卡。宁可明确报错，也不能静默连错设备。",
+        "",
+        "    device_id 允许写成逗号分隔的多个 UUID：macOS peripheral UUID 会随系统/配对",
+        "    轮换，别名注册表可以把同一台卡历次出现过的 UUID 都登记进来，命中任意一个即可。",
+        "    device_id 为空（首次扫描绑定）时仍保留按厂商数据或名字发现的兜底。",
+        "    \"\"\"",
+        "    devs = await bleak.BleakScanner.discover(timeout=SCAN_ROUND, return_adv=True)",
+        "    bound = {x.strip().upper() for x in (device_id or \"\").split(\",\") if x.strip()}",
+        "    fallback = None",
+        "",
+        "    def _tag(dev, adv, match):",
+        "        # 把 rssi 和匹配方式挂到设备对象上，连接日志里能看出走的是哪条路径",
+        "        try:",
+        "            dev._adv_rssi = getattr(adv, \"rssi\", None)",
+        "            dev._todoocard_match = match",
+        "        except Exception:",
+        "            pass",
+        "        return dev",
+        "",
+        "    for addr, (dev, adv) in devs.items():",
+        "        name = dev.name or adv.local_name or \"\"",
+        "        if bound and str(addr).upper() in bound:",
+        "            return _tag(dev, adv, \"exact\")",
+        "        if bound:",
+        "            continue",
+        "        if fallback is None:",
+        "            if 0x5053 in (adv.manufacturer_data or {}):",
+        "                fallback = _tag(dev, adv, \"fallback\")",
+        "            elif \"todoo\" in name.lower():",
+        "                fallback = _tag(dev, adv, \"fallback\")",
+        "    return fallback"
+      ]
+    },
+    {
+      "id": "sender-scan-log-match",
+      "file": "sender.py",
+      "marker": "明确标出精确绑定还是兜底",
+      "lines": [
+        "        if dev:",
+        "            rssi = getattr(dev, \"_adv_rssi\", None)",
+        "            log(f\"[sender] 看到卡片：{dev.name or getattr(dev, 'address', '?')}\"",
+        "                + (f\"（rssi {rssi}）\" if rssi is not None else \"\"))",
+        "            return dev"
+      ],
+      "replacement": [
+        "        if dev:",
+        "            # TODOOCARD-HOTFIX-1.0.11: 明确标出精确绑定还是兜底，并显示真实 UUID",
+        "            rssi = getattr(dev, \"_adv_rssi\", None)",
+        "            _addr = getattr(dev, \"address\", \"?\")",
+        "            _match = getattr(dev, \"_todoocard_match\", \"unknown\")",
+        "            log(f\"[sender] 看到卡片：{dev.name or _addr}（{_addr}，匹配={_match}）\"",
+        "                + (f\"（rssi {rssi}）\" if rssi is not None else \"\"))",
+        "            return dev"
+      ]
+    },
+    {
+      "id": "sender-scan-bound-error",
+      "file": "sender.py",
+      "marker": "没看到已绑定的卡片",
+      "lines": [
+        "    raise TransferError(",
+        "        f\"等了 {int(timeout)} 秒没看到卡片广播：确认蓝牙开着、卡片有电、没被 TodooCam 等 App 占着\")"
+      ],
+      "replacement": [
+        "    # TODOOCARD-HOTFIX-1.0.11: 已绑定却扫不到目标卡时明确提示重新绑定，别误连别的卡",
+        "    if device_id:",
+        "        raise TransferError(",
+        "            f\"没看到已绑定的卡片 {device_id}（等了 {int(timeout)} 秒）：\"",
+        "            \"长按卡片背面按钮 5 秒唤醒它；macOS 蓝牙 UUID 可能变化，\"",
+        "            \"仍不行就在控制台重新扫描绑定这台卡\")",
+        "    raise TransferError(",
+        "        f\"等了 {int(timeout)} 秒没看到卡片广播：确认蓝牙开着、卡片有电、没被 TodooCam 等 App 占着\")"
+      ]
+    },
+    {
+      "id": "card-scan-card-bound-set",
+      "file": "card.py",
+      "marker": "允许一个别名对应多个 UUID",
+      "lines": [
+        "        target = (self.cfg.get(\"device_id\") or \"\").upper()"
+      ],
+      "replacement": [
+        "        # TODOOCARD-HOTFIX-1.0.11: 允许一个别名对应多个 UUID（macOS UUID 会轮换）",
+        "        bound = {x.strip().upper() for x in (self.cfg.get(\"device_id\") or \"\").split(\",\") if x.strip()}"
+      ]
+    },
+    {
+      "id": "card-scan-card-exact",
+      "file": "card.py",
+      "marker": "已绑定时只认精确 UUID",
+      "lines": [
+        "                name = (dev.name or adv.local_name or \"\")",
+        "                if target and str(addr).upper() != target and \"todoo\" not in name.lower():",
+        "                    continue"
+      ],
+      "replacement": [
+        "                # TODOOCARD-HOTFIX-1.0.11: 两台卡名字都叫 TodooCard，原条件里的",
+        "                # \"todoo\" in name 会让非绑定的那台也通过；已绑定时只认精确 UUID",
+        "                if bound and str(addr).upper() not in bound:",
+        "                    continue"
+      ]
+    },
+    {
+      "id": "card-friendly-bound-error",
+      "file": "card.py",
+      "marker": "没找到已绑定的那张卡",
+      "lines": [
+        "    if \"没看到卡片广播\" in text:",
+        "        return \"没等到卡片广播：确认蓝牙开着、卡片有电、没被手机 App 连着；再点一次会继续等\""
+      ],
+      "replacement": [
+        "    # TODOOCARD-HOTFIX-1.0.11: 已绑定却没找到目标卡 → 引导唤醒/重新绑定，别发到别的卡",
+        "    if \"没看到已绑定的卡片\" in text:",
+        "        return \"没找到已绑定的那张卡：长按背面按钮 5 秒唤醒它；若仍不行，在控制台重新扫描绑定\"",
+        "    if \"没看到卡片广播\" in text:",
+        "        return \"没等到卡片广播：确认蓝牙开着、卡片有电、没被手机 App 连着；再点一次会继续等\""
       ]
     }
   ]

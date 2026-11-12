@@ -145,6 +145,13 @@ checks = [
     # 发送失败弹窗要显示真正原因，而不是 [sender] 日志开头
     ("超时错误映射成短句", "卡片没回应蓝牙指令" in card),
     ("兜底只取日志最后一行", "lines = [ln.strip() for ln in text.splitlines()" in card),
+    # 精确绑定：两台卡广播名/厂商数据相同，绝不 fallback 到另一台
+    ("已绑定只认精确 UUID", "已绑定 device_id 时" in sender),
+    ("绑定的卡没出现就跳过", "if bound:\n            continue" in sender),
+    ("日志标出 exact/fallback", "匹配={_match}" in sender),
+    ("明确报没看到已绑定的卡", "没看到已绑定的卡片" in sender),
+    ("后台自动配对也只认精确 UUID", "if bound and str(addr).upper() not in bound:" in card),
+    ("绑定失败提示引导重新绑定", "没找到已绑定的那张卡" in card),
 ]
 for label, ok in checks:
     print(f"  {'OK  ' if ok else 'FAIL'} {label}")
